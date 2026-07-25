@@ -7,8 +7,8 @@ interface SidebarProps {
   onPageChange: (page: Page) => void;
 }
 
-// Simple inline SVG icon set — no external dependency, no emoji.
-const Icon = {
+// Inline SVG icon set — no external deps, no emoji.
+const I = {
   monitoring: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="w-4 h-4">
       <path d="M3 3v18h18" /><path d="M7 15l4-4 3 3 5-6" />
@@ -43,48 +43,67 @@ const Icon = {
 };
 
 const menuItems: { id: Page; label: string; icon: React.ReactNode }[] = [
-  { id: 'monitoring', label: 'Monitoring',       icon: Icon.monitoring },
-  { id: 'filters',    label: 'Filter Profiles',  icon: Icon.filters },
-  { id: 'google',     label: 'Google Sheets',    icon: Icon.google },
-  { id: 'settings',   label: 'Settings',         icon: Icon.settings },
-  { id: 'logs',       label: 'Logs',             icon: Icon.logs },
-  { id: 'about',      label: 'About',            icon: Icon.about },
+  { id: 'monitoring', label: 'Monitoring',      icon: I.monitoring },
+  { id: 'filters',    label: 'Filter Profiles', icon: I.filters    },
+  { id: 'google',     label: 'Google Sheets',   icon: I.google     },
+  { id: 'settings',   label: 'Settings',        icon: I.settings   },
+  { id: 'logs',       label: 'Logs',            icon: I.logs       },
+  { id: 'about',      label: 'About',           icon: I.about      },
 ];
 
 const Sidebar: React.FC<SidebarProps> = ({ currentPage, onPageChange }) => {
   return (
-    <aside className="w-56 bg-bg-secondary border-r border-border-color flex flex-col">
-      <div className="px-4 py-4 border-b border-border-color">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded bg-accent-primary flex items-center justify-center text-white text-xs font-bold">L</div>
-          <div>
-            <h1 className="text-sm font-semibold text-text-primary leading-tight">Live Deposit Monitor</h1>
-            <p className="text-[10px] text-text-tertiary">v1.0.0</p>
-          </div>
+    <aside className="w-52 bg-bg-secondary border-r border-border-color flex flex-col shrink-0">
+      {/* Brand */}
+      <div className="h-12 px-3 flex items-center gap-2 border-b border-border-color">
+        <div className="w-6 h-6 rounded-md bg-gradient-to-br from-accent-primary to-accent-strong flex items-center justify-center text-white text-[11px] font-bold shadow-sunken">
+          L
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="text-[12.5px] font-semibold text-text-primary leading-tight truncate">Live Deposit Monitor</div>
+          <div className="text-[10px] text-text-muted leading-tight">v1.0.0</div>
         </div>
       </div>
 
-      <nav className="flex-1 p-2 space-y-0.5">
-        {menuItems.map(item => (
-          <button
-            key={item.id}
-            data-testid={`sidebar-${item.id}`}
-            aria-current={currentPage === item.id ? 'page' : undefined}
-            onClick={() => onPageChange(item.id)}
-            className={`w-full flex items-center gap-3 px-3 py-2 rounded text-left transition-colors ${
-              currentPage === item.id
-                ? 'bg-accent-primary/15 text-accent-primary border border-accent-primary/30'
-                : 'text-text-secondary hover:bg-bg-tertiary/60 hover:text-text-primary border border-transparent'
-            }`}
-          >
-            <span>{item.icon}</span>
-            <span className="text-sm font-medium">{item.label}</span>
-          </button>
-        ))}
+      {/* Nav */}
+      <nav className="flex-1 p-1.5 overflow-y-auto">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-muted px-2.5 pt-1 pb-1">
+          Workspace
+        </div>
+        <ul className="space-y-[2px]">
+          {menuItems.map(item => {
+            const active = currentPage === item.id;
+            return (
+              <li key={item.id}>
+                <button
+                  data-testid={`sidebar-${item.id}`}
+                  aria-current={active ? 'page' : undefined}
+                  onClick={() => onPageChange(item.id)}
+                  className={`w-full h-[30px] px-2.5 flex items-center gap-2 rounded-md text-left text-[13px] transition-colors ${
+                    active
+                      ? 'bg-accent-subtle text-white'
+                      : 'text-text-secondary hover:bg-white/[0.03] hover:text-text-primary'
+                  }`}
+                >
+                  {/* Active indicator: 2-px vertical strip */}
+                  <span
+                    className={`inline-block w-[2px] h-4 rounded-sm ${active ? 'bg-accent-primary' : 'bg-transparent'}`}
+                  />
+                  <span className={active ? 'text-accent-primary' : 'text-text-tertiary'}>
+                    {item.icon}
+                  </span>
+                  <span className="font-medium truncate">{item.label}</span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
       </nav>
 
-      <div className="p-3 border-t border-border-color text-[10px] text-text-tertiary">
-        Production build • Electron 28
+      {/* Footer */}
+      <div className="px-3 py-2 border-t border-border-color text-[10px] text-text-muted flex items-center justify-between">
+        <span>Production</span>
+        <span className="tabular-nums">Electron 28</span>
       </div>
     </aside>
   );

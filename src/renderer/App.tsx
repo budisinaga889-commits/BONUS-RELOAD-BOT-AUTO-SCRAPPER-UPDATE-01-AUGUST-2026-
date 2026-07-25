@@ -57,13 +57,13 @@ const App: React.FC = () => {
         position="top-right"
         toastOptions={{
           duration: 3000,
-          style: { background: '#242424', color: '#e0e0e0', border: '1px solid #333333', fontSize: '13px' }
+          style: { background: '#1c1e21', color: '#e6e8ec', border: '1px solid #2b2f36', fontSize: '13px' }
         }}
       />
 
       <div className="flex flex-1 overflow-hidden">
         <Sidebar currentPage={currentPage} onPageChange={setCurrentPage} />
-        <main className="flex-1 overflow-auto p-5">
+        <main className="flex-1 overflow-auto p-4">
           {renderPage()}
         </main>
       </div>

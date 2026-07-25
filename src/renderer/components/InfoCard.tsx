@@ -1,9 +1,11 @@
 import React from 'react';
 
 /**
- * Compact information card used across the operator dashboard.
- *
- * Consistent header + body layout. No behaviour — purely presentational.
+ * Compact info card — iteration 11.1 refinements:
+ *   - Tighter padding (py-2 header, p-3 body) to fit more information above the fold
+ *   - Subtle top-highlight on the card via `shadow-card` (1px inner rgba white 2%)
+ *   - Header uses uppercase micro-caps for a professional operator-tool feel
+ *   - No decorative shadows or blur
  */
 interface InfoCardProps {
   title: string;
@@ -21,29 +23,32 @@ const InfoCard: React.FC<InfoCardProps> = ({
   return (
     <section
       data-testid={testId}
-      className={`bg-bg-secondary border border-border-color rounded-md flex flex-col ${className || ''}`}
+      className={`bg-bg-secondary border border-border-color rounded-md shadow-card flex flex-col ${className || ''}`}
     >
-      <header className="flex items-center justify-between px-4 py-2.5 border-b border-border-color">
-        <div className="flex items-center gap-2">
-          {icon && <span className="text-text-secondary">{icon}</span>}
-          <h3 className="text-xs uppercase tracking-wider font-semibold text-text-secondary">{title}</h3>
+      <header className="flex items-center justify-between px-3 h-8 border-b border-border-color/80">
+        <div className="flex items-center gap-1.5">
+          {icon && <span className="text-text-tertiary">{icon}</span>}
+          <h3 className="text-[10.5px] uppercase tracking-[0.08em] font-semibold text-text-tertiary">
+            {title}
+          </h3>
         </div>
         {action}
       </header>
-      <div className={`p-4 flex-1 ${bodyClassName || ''}`}>{children}</div>
+      <div className={`px-3 py-2.5 flex-1 ${bodyClassName || ''}`}>{children}</div>
     </section>
   );
 };
 
 /**
- * Consistent single-row inside a card: `Label ................ Value`.
+ * Single row inside a card: label on left, value on right.
+ * Iteration 11.1: tighter, tabular numerals by default.
  */
 export const InfoRow: React.FC<{ label: string; children: React.ReactNode; className?: string }> = ({
   label, children, className
 }) => (
-  <div className={`flex items-center justify-between py-1.5 text-sm ${className || ''}`}>
+  <div className={`flex items-center justify-between py-[5px] text-[12.5px] ${className || ''}`}>
     <span className="text-text-secondary">{label}</span>
-    <span className="text-text-primary text-right truncate max-w-[60%]">{children}</span>
+    <span className="text-text-primary text-right truncate max-w-[62%] text-tabular">{children}</span>
   </div>
 );
 
