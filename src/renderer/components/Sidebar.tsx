@@ -69,6 +69,7 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, onPageChange }) => {
           <button
             key={item.id}
             data-testid={`sidebar-${item.id}`}
+            aria-current={currentPage === item.id ? 'page' : undefined}
             onClick={() => onPageChange(item.id)}
             className={`w-full flex items-center gap-3 px-3 py-2 rounded text-left transition-colors ${
               currentPage === item.id

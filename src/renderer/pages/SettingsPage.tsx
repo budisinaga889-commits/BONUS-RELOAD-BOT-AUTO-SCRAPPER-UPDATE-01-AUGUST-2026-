@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { useMonitoringStore } from '../store/monitoring-store';
 import { AppConfig } from '../../types/config';
+import { DEFAULT_CONFIG } from '../../utils/constants';
 import InfoCard from '../components/InfoCard';
 import ConfirmDialog from '../components/ConfirmDialog';
 
@@ -21,9 +22,16 @@ const SettingsPage: React.FC = () => {
   useEffect(() => { loadConfig(); }, []);
 
   const loadConfig = async () => {
-    if (!window.electron) return;
+    // Fall back to hard-coded defaults so the Settings screen still
+    // renders when running outside the Electron preload context
+    // (e.g. Vite dev preview, static-hosted renderer, e2e tests).
+    if (!window.electron) {
+      setConfig(DEFAULT_CONFIG as unknown as AppConfig);
+      return;
+    }
     const result = await window.electron.getAppConfig();
     if (result.success) setConfig(result.data);
+    else setConfig(DEFAULT_CONFIG as unknown as AppConfig);
   };
 
   const handleSave = async () => {
