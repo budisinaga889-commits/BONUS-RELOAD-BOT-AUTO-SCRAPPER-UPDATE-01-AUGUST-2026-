@@ -1,0 +1,700 @@
+import { Transaction, RawTransaction } from '../../types/transaction';
+import { FilterProfile } from '../../types/filter-profile';
+import { MonitoringState, ExportStats, PreRunValidation, PreRunCheck } from '../../types/monitoring';
+import { PlaywrightService } from './playwright-service';
+import { FilterManager } from './filter-manager';
+import { PageScanner } from './page-scanner';
+import { TransactionValidator } from './transaction-validator';
+import { FingerprintGenerator } from './fingerprint-generator';
+import { SQLiteService } from './sqlite-service';
+import { GoogleSheetsService } from './google-sheets-service';
+import { ConfigManager } from './config-manager';
+import { getLogger } from './logger-service';
+import { AppConfig } from '../../types/config';
+
+export class MonitoringEngine {
+  private state: MonitoringState = 'IDLE';
+  private isRunning: boolean = false;
+  private cachedFingerprints: Set<string> = new Set();
+  private bufferFingerprints: Set<string> = new Set();
+  private processedInCycle: Set<string> = new Set();
+  private buffer: Transaction[] = [];
+  private retryQueue: Transaction[] = [];
+  /**
+   * Resume Marker — short KEY_ID (8-char upper-case fingerprint) of the
+   * newest transaction confirmed as exported to Google Sheets. Persisted
+   * in SQLite via `app_state('resume_marker')`; validated against Sheets
+   * at startMonitoring (Sheets wins on disagreement). Advanced ONLY after
+   * a successful Sheets append + Mark-Exported step.
+   */
+  private resumeMarker: string | null = null;
+  private exportStats: ExportStats = {
+    pendingQueueCount: 0,
+    retryQueueCount: 0,
+    successfulExportsToday: 0,
+    lastExportTime: null,
+    lastExportCount: 0,
+    loadedFingerprints: 0,
+    storedTransactions: 0,
+    transactionsScanned: 0,
+    newTransactions: 0,
+    duplicatesSkipped: 0,
+    rejectedTransactions: 0,
+    manualDateMode: true,
+    initialSyncMode: false,
+    duplicateDetection: true,
+    sqliteConnected: false,
+    googleSheetsConnected: false,
+    unavailableProfiles: []
+  };
+  // Per-cycle counters for the pipeline audit log. Reset at the top of
+  // every runMonitoringCycle. Persisted counters (successfulExportsToday,
+  // storedTransactions, loadedFingerprints) live in `exportStats`.
+  //
+  // NOTE: business filtering (Status / Done / Deposit Type / Agent /
+  // Include & Exclude keywords) is applied by the browser BEFORE any row
+  // becomes visible in the deposit table. The backend does not repeat
+  // those decisions, so there is no separate "filter-match" counter.
+  private cycleCounters = {
+    parsed: 0,           // rows returned by HTMLMapper as valid transactions
+    validated: 0,        // passed Essential Field Check
+    duplicates: 0,       // rejected by isDuplicate / processedInCycle
+    rejected: 0,         // failed Essential Field Check
+    fingerprintsCreated: 0,
+    buffered: 0,
+    sqliteInserted: 0,
+    sheetsAppended: 0,
+    markedExported: 0
+  };
+  private config: AppConfig | null = null;
+  private panelUrl: string = '';
+  private onStateChange?: (state: MonitoringState) => void;
+  private onStatsUpdate?: (stats: ExportStats) => void;
+  
+  constructor(
+    private playwrightService: PlaywrightService,
+    private filterManager: FilterManager,
+    private validator: TransactionValidator,
+    private fingerprintGen: FingerprintGenerator,
+    private sqliteService: SQLiteService,
+    private googleSheetsService: GoogleSheetsService,
+    private configManager: ConfigManager
+  ) {}
+  
+  setStateChangeCallback(cb: (state: MonitoringState) => void): void {
+    this.onStateChange = cb;
+  }
+  
+  setStatsUpdateCallback(cb: (stats: ExportStats) => void): void {
+    this.onStatsUpdate = cb;
+  }
+  
+  async initialize(): Promise<void> {
+    const logger = getLogger();
+    logger.info('Initializing Monitoring Engine...');
+    
+    this.config = await this.configManager.loadAppConfig();
+    await this.filterManager.loadProfiles();
+    
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    this.cachedFingerprints = await this.sqliteService.loadFingerprints(thirtyDaysAgo);
+    
+    const pending = await this.sqliteService.getPendingExports();
+    if (pending.length > 0) {
+      logger.info(`Restored ${pending.length} pending exports`);
+      this.retryQueue.push(...pending);
+    }
+    
+    // Load the Resume Marker from SQLite. Cross-check with Google Sheets
+    // happens later in startMonitoring() once the Sheets client is
+    // connected — SQLite is only a fast local cache; Sheets is the
+    // production source of truth.
+    this.resumeMarker = await this.sqliteService.getResumeMarker();
+    if (this.resumeMarker) {
+      logger.info(`Resume Marker loaded from SQLite: ${this.resumeMarker}`);
+    } else {
+      logger.info('Resume Marker: none in SQLite (fresh install or first run).');
+    }
+    
+    // Prime the live dashboard stats with the initial persisted counters.
+    this.exportStats.loadedFingerprints = this.cachedFingerprints.size;
+    this.exportStats.storedTransactions = await this.sqliteService.getStoredTransactionCount();
+    this.exportStats.sqliteConnected = this.sqliteService.isReady();
+    this.exportStats.googleSheetsConnected = this.googleSheetsService.isConnected();
+    this.exportStats.manualDateMode = this.config?.features.manualDateMode !== false;
+    this.exportStats.initialSyncMode = this.config?.features.initialSyncMode === true;
+    this.exportStats.retryQueueCount = this.retryQueue.length;
+    if (this.onStatsUpdate) this.onStatsUpdate({ ...this.exportStats });
+    
+    logger.success(`Monitoring Engine initialized (fingerprints=${this.cachedFingerprints.size}, stored=${this.exportStats.storedTransactions}, pending=${this.retryQueue.length})`);
+  }
+  
+  async validatePreRunChecks(): Promise<PreRunValidation> {
+    const checks: PreRunCheck[] = [];
+    
+    checks.push({
+      name: 'Browser Ready', status: this.playwrightService.isReady(),
+      icon: '🌐', error: 'Browser not opened. Click "Open Browser".'
+    });
+    
+    const session = await this.playwrightService.validateSession();
+    checks.push({
+      name: 'Manual Login Completed', status: session.ok,
+      icon: '👤',
+      error: session.reason || 'Not logged in. Please login manually.'
+    });
+    if (session.ok) {
+      getLogger().success('Manual login validated');
+    } else {
+      getLogger().warn(`Login validation failed: ${session.reason}`);
+    }
+    
+    checks.push({
+      name: 'SQLite Initialized', status: this.sqliteService.isReady(),
+      icon: '💾', error: 'Database not initialized.'
+    });
+    
+    const googleConfig = await this.configManager.loadGoogleSheetsConfig();
+    
+    checks.push({
+      name: 'Google Credential Loaded',
+      status: googleConfig !== null && googleConfig.credentialJsonPath !== '',
+      icon: '🔑', error: 'Google credential not configured.'
+    });
+    
+    checks.push({
+      name: 'Spreadsheet Found', status: googleConfig?.isConnected === true,
+      icon: '📊', error: 'Spreadsheet not accessible.'
+    });
+    
+    checks.push({
+      name: 'Worksheet MASTER Found', status: googleConfig?.worksheetName === 'MASTER',
+      icon: '📄', error: 'Worksheet "MASTER" not found.'
+    });
+    
+    checks.push({
+      name: 'Worksheet Headers Valid', status: googleConfig?.headersValidated === true,
+      icon: '📋', error: 'Worksheet headers invalid.'
+    });
+    
+    const enabledProfiles = this.filterManager.getEnabledProfiles();
+    checks.push({
+      name: 'Filter Profiles Available', status: enabledProfiles.length > 0,
+      icon: '🎯', error: 'No enabled filter profiles.'
+    });
+    
+    const allPassed = checks.every(c => c.status);
+    return { passed: allPassed, checks, canStartMonitoring: allPassed };
+  }
+  
+  async startMonitoring(panelUrl: string): Promise<void> {
+    if (this.isRunning) return;
+    
+    this.panelUrl = panelUrl;
+    this.isRunning = true;
+    
+    getLogger().info('Starting monitoring...');
+    
+    const googleConfig = await this.configManager.loadGoogleSheetsConfig();
+    if (googleConfig) {
+      await this.googleSheetsService.connect(googleConfig);
+    }
+    
+    // Resolve the Resume Marker against Google Sheets (production source
+    // of truth). Runs AFTER connect() so the Sheets client is ready. Safe
+    // to skip when Sheets is unreachable — the SQLite marker (if any)
+    // remains authoritative until the next successful export syncs it.
+    await this.resolveResumeMarker();
+    
+    this.runMonitoringLoop().catch(error => {
+      getLogger().error('Monitoring loop error', error);
+      this.isRunning = false;
+      this.setState('ERROR');
+    });
+  }
+  
+  /**
+   * Reconcile the SQLite Resume Marker with Google Sheets column D.
+   *
+   *   • Sheets NOT connected  → keep SQLite marker as-is (offline start).
+   *   • Sheets EMPTY          → clear the SQLite marker so we scan every
+   *                             transaction (nothing to resume from).
+   *   • Sheets ≠ SQLite       → Sheets wins. Overwrite SQLite marker and
+   *                             use the Sheets value going forward.
+   *   • Sheets === SQLite     → happy path. Continue with the SQLite value.
+   */
+  private async resolveResumeMarker(): Promise<void> {
+    const logger = getLogger();
+    if (!this.googleSheetsService.isConnected()) {
+      logger.info(
+        '\n========== RESUME MARKER ==========\n' +
+        `  Source           : SQLite (Sheets not connected)\n` +
+        `  Loaded KEY_ID    : ${this.resumeMarker || '(none)'}\n` +
+        `  Sync Result      : SKIPPED (offline start)\n` +
+        `  Resume Ready     : true\n` +
+        '===================================='
+      );
+      return;
+    }
+    const sheetsKeyId = await this.googleSheetsService.getLatestExportedKeyId();
+    let source = 'SQLite';
+    let syncResult = 'IN_SYNC';
+    if (sheetsKeyId && sheetsKeyId !== this.resumeMarker) {
+      source = 'Google Sheets';
+      syncResult = this.resumeMarker
+        ? `RESYNCED (SQLite="${this.resumeMarker}" → Sheets="${sheetsKeyId}")`
+        : `RESYNCED (SQLite=(none) → Sheets="${sheetsKeyId}")`;
+      this.resumeMarker = sheetsKeyId;
+      await this.sqliteService.saveResumeMarker(sheetsKeyId);
+    } else if (!sheetsKeyId && this.resumeMarker) {
+      source = 'Google Sheets';
+      syncResult = `RESYNCED (SQLite="${this.resumeMarker}" → Sheets=(empty)) — full scan next cycle`;
+      this.resumeMarker = null;
+      // Wipe the stale marker so subsequent runs don't stop early.
+      await this.sqliteService.saveResumeMarker('');
+    } else if (!sheetsKeyId) {
+      source = 'Google Sheets';
+      syncResult = 'EMPTY (nothing exported yet)';
+    }
+    logger.info(
+      '\n========== RESUME MARKER ==========\n' +
+      `  Source           : ${source}\n` +
+      `  Loaded KEY_ID    : ${this.resumeMarker || '(none)'}\n` +
+      `  Sync Result      : ${syncResult}\n` +
+      `  Resume Ready     : true\n` +
+      '===================================='
+    );
+  }
+  
+  async stopMonitoring(): Promise<void> {
+    getLogger().info('Stopping monitoring...');
+    this.isRunning = false;
+  }
+  
+  private async runMonitoringLoop(): Promise<void> {
+    while (this.isRunning) {
+      try {
+        await this.runMonitoringCycle();
+        
+        if (this.isRunning) {
+          this.setState('SLEEPING');
+          const interval = this.config?.monitoring.pollingInterval || 2;
+          await this.sleep(interval * 1000);
+        }
+      } catch (error) {
+        getLogger().error('Cycle error', error);
+        this.setState('ERROR');
+        await this.sleep(5000);
+      }
+    }
+    
+    this.setState('IDLE');
+  }
+  
+  private async runMonitoringCycle(): Promise<void> {
+    const start = Date.now();
+    this.processedInCycle.clear();
+    
+    // Reload config at the top of every cycle so Settings changes
+    // (maxPageScan, initialSyncMode, manualDateMode, batchSize, etc.) take
+    // effect on the NEXT cycle without requiring an app restart. This fixes
+    // both Bug #2 (maxPageScan ignored after Settings change) and Bug #4
+    // (Initial Sync OFF didn't restore incremental monitoring).
+    try {
+      this.config = await this.configManager.loadAppConfig();
+      getLogger().info(
+        `Config reloaded: maxPageScan=${this.config.monitoring.maxPageScan}, ` +
+        `initialSyncMode=${this.config.features.initialSyncMode === true}, ` +
+        `manualDateMode=${this.config.features.manualDateMode !== false}, ` +
+        `batchSize=${this.config.monitoring.batchSize}`
+      );
+    } catch (e: any) {
+      getLogger().warn(`Config reload failed — using previous in-memory config. ${e?.message || e}`);
+    }
+    
+    // Reset per-cycle counters (persisted counters unaffected).
+    this.cycleCounters = {
+      parsed: 0, validated: 0, duplicates: 0, rejected: 0,
+      fingerprintsCreated: 0, buffered: 0, sqliteInserted: 0,
+      sheetsAppended: 0, markedExported: 0
+    };
+    
+    this.setState('LOADING_FILTERS');
+    const filters = this.filterManager.getEnabledProfiles();
+    
+    if (filters.length === 0) return;
+
+    // [FILTER PROFILE] per-cycle availability tracking. Populated by the
+    // per-filter catch below when applyFilter() throws a soft
+    // `isProfileUnavailable` error. Never triggers a fallback; used only
+    // for the operator-facing status log and the dashboard status card.
+    const unavailableProfileNames: string[] = [];
+    let appliedProfileCount = 0;
+    
+    // Every polling cycle always starts from Page 1 (iter-9 directive).
+    // Adaptive scanning by Process Date has been removed — the panel is
+    // ordered by Created At and Process Date is non-monotonic, so no
+    // scan-ordering decision can be trusted based on it. The single
+    // scan-termination signal is "first fully duplicated page" and is
+    // driven by fingerprint + SQLite alone (see PageScanner.setDuplicateCheck).
+    const initialSyncMode = this.config?.features.initialSyncMode === true;
+    if (initialSyncMode) {
+      getLogger().info('Initial Sync Mode ACTIVE — duplicate-page stop disabled; scan up to maxPageScan pages.');
+    } else {
+      getLogger().info('Incremental monitoring — scan stops at the first page where every row is already in SQLite.');
+    }
+    
+    for (const filter of filters) {
+      if (!this.isRunning) break;
+      
+      try {
+        await this.processFilter(filter);
+        appliedProfileCount++;
+      } catch (error: any) {
+        if (error && error.isProfileUnavailable) {
+          // Profile-availability skip: NOT a cycle error. Record it,
+          // emit the operator-facing status, and continue with the
+          // next enabled profile. Never fall back to "All", the
+          // browser default, or the first available option.
+          unavailableProfileNames.push(filter.name);
+          getLogger().warn(
+            `[FILTER PROFILE] ${filter.name} — NOT AVAILABLE, SKIPPED. Continuing with remaining enabled profiles...`
+          );
+          continue;
+        }
+        if (error && error.isCycleFatal) {
+          getLogger().error(`Cycle aborted (fatal): ${filter.name} — ${error.message}`);
+          throw error;
+        }
+        getLogger().error(`Filter error: ${filter.name}`, error);
+      }
+    }
+
+    // When every enabled profile in this cycle was unavailable, emit the
+    // operator-required "no profile available" status. No fallback is
+    // ever performed; the loop simply sleeps and retries next tick.
+    const enabledCount = filters.length;
+    if (enabledCount > 0 && appliedProfileCount === 0 && unavailableProfileNames.length === enabledCount) {
+      getLogger().warn(
+        '\n[FILTER PROFILE]\n' +
+        '  No enabled payment profile is currently available.\n' +
+        '  Monitoring skipped.\n' +
+        '  Waiting for next polling cycle...'
+      );
+    }
+    this.exportStats.unavailableProfiles = [...unavailableProfileNames];
+    
+    if (this.buffer.length > 0) {
+      await this.exportBuffer();
+    }
+    
+    await this.updateExportStats();
+    
+    // === PIPELINE AUDIT (operator-requested per-cycle log block) ===
+    // Emits a plain-text summary of every stage's SUCCESS/FAILED count so
+    // future production troubleshooting can happen without code changes.
+    const c = this.cycleCounters;
+    const parsedGE = c.parsed;
+    const sheetsStatus = this.googleSheetsService.isConnected() ? 'connected' : 'DISCONNECTED (rows persisted to SQLite only)';
+    getLogger().info(
+      '\n========== PIPELINE AUDIT (this cycle) ==========\n' +
+      `  Transactions Parsed              : ${parsedGE}\n` +
+      `  Essential Field Check            : ${c.validated} passed, ${c.rejected} rejected\n` +
+      `  Fingerprints Created             : ${c.fingerprintsCreated}\n` +
+      `  Duplicates Skipped               : ${c.duplicates}\n` +
+      `  Transactions Buffered            : ${c.buffered}\n` +
+      `  SQLite Records Inserted          : ${c.sqliteInserted}\n` +
+      `  Google Sheets Batch Appended     : ${c.sheetsAppended}\n` +
+      `  Transactions Marked Exported     : ${c.markedExported}\n` +
+      `  Google Sheets Connection         : ${sheetsStatus}\n` +
+      `  Diagnostic Logging               : ${getLogger().isDiagEnabled() ? 'ENABLED' : 'disabled'}\n` +
+      `  Fingerprints Loaded (init)       : ${this.exportStats.loadedFingerprints}\n` +
+      `  Stored Transactions (SQLite)     : ${this.exportStats.storedTransactions}\n` +
+      `  Export Queue (retry)             : ${this.retryQueue.length}\n` +
+      '===================================================='
+    );
+    
+    // Explicit pipeline invariant check — the equation the operator requested:
+    //   parsed = sqlite_inserted + duplicates_skipped + rejected
+    //   sqlite_inserted = sheets_appended = marked_exported  (when Sheets connected)
+    if (parsedGE > 0) {
+      const equation = c.sqliteInserted + c.duplicates + c.rejected;
+      if (equation !== parsedGE) {
+        getLogger().warn(
+          `Pipeline invariant deviation: parsed=${parsedGE} but ` +
+          `(sqliteInserted=${c.sqliteInserted} + duplicates=${c.duplicates} + rejected=${c.rejected})=${equation}. ` +
+          `Investigate silent-drop between stages.`
+        );
+      }
+      if (this.googleSheetsService.isConnected() && c.sheetsAppended !== c.sqliteInserted) {
+        getLogger().warn(
+          `Sheets append count mismatch: sqliteInserted=${c.sqliteInserted}, sheetsAppended=${c.sheetsAppended}. ` +
+          `Some persisted transactions did not reach Google Sheets.`
+        );
+      }
+    }
+    
+    getLogger().success(`Monitoring cycle completed in ${Date.now() - start}ms`);
+  }
+  
+  private async processFilter(filter: FilterProfile): Promise<void> {
+    const page = this.playwrightService.getPage();
+    if (!page) throw new Error('Browser page not available');
+    
+    // Propagate the manual-date preference from config into the service.
+    // Default: true (reliability > automation, per production directive).
+    const manualDateMode = this.config?.features.manualDateMode !== false;
+    
+    await this.playwrightService.applyFilter(
+      { name: filter.name, agent: filter.agent, depositType: filter.depositType },
+      { manualDateMode }
+    );
+    
+    this.setState('SCANNING_PAGE');
+    const scanner = new PageScanner(page);
+    // Cancellation signal — the scanner checks this at the top of every
+    // page iteration AND before/after each pagination click so Stop
+    // Monitoring interrupts the loop after the current page finishes
+    // instead of waiting for the whole cycle to end.
+    scanner.setShouldStop(() => !this.isRunning);
+    // Duplicate detector — the ONLY scan-termination signal (iter-9).
+    // Uses fingerprint + SQLite + the current in-cycle cache. When a full
+    // page returns nothing new, the scanner stops. The engine still
+    // receives every parsed row and runs the full pipeline (Essential
+    // Field Check → fingerprint → dedup → buffer). Skipped in Initial
+    // Sync Mode where every row is new by definition.
+    const initialSyncMode = this.config?.features.initialSyncMode === true;
+    if (initialSyncMode) {
+      scanner.setDuplicateCheck(null);
+    } else {
+      scanner.setDuplicateCheck((raw) => {
+        const fp = this.fingerprintGen.generate(raw);
+        return this.processedInCycle.has(fp) || this.isDuplicate(fp);
+      });
+    }
+    
+    const maxPages = this.config?.monitoring.maxPageScan || 10;
+    const result = await scanner.scanPages(filter, maxPages);
+    
+    // If pagination navigation verification failed anywhere in the scan,
+    // treat it as CYCLE-FATAL: the browser state is unreliable, so we must
+    // not continue processing partial results or move to the next filter.
+    if (result.navigationFailure) {
+      const err: any = new Error(
+        `Navigation verification failed while scanning "${filter.name}" — aborting cycle`
+      );
+      err.isCycleFatal = true;
+      throw err;
+    }
+    
+    for (const raw of result.transactions) {
+      if (!this.isRunning) break;
+      await this.processTransaction(raw, filter);
+    }
+  }
+  
+  private async processTransaction(raw: RawTransaction, filter: FilterProfile): Promise<void> {
+    this.cycleCounters.parsed++;
+    
+    // Essential Field Check — verifies the parser extracted the minimum
+    // set of fields needed to fingerprint and export the row. NO business
+    // filtering happens here; the browser already applied every configured
+    // filter before this row became visible in the deposit table.
+    this.setState('VALIDATING');
+    const validation = this.validator.validate(raw);
+    if (!validation.valid) {
+      this.cycleCounters.rejected++;
+      getLogger().diag(
+        [
+          '========================',
+          'ESSENTIAL FIELD CHECK',
+          '========================',
+          `Filter Profile: ${filter.name}`,
+          '--------------------------------',
+          `Transaction #${this.cycleCounters.parsed}`,
+          `User    : ${raw.userName || '(blank)'}`,
+          `Account : ${raw.accountNumber || '(blank)'}`,
+          `Amount  : ${raw.amount}`,
+          `Process : ${raw.processDate || '(blank)'}`,
+          `Result  : REJECTED`,
+          `Reason  : ${validation.errors.join(', ')}`,
+          '--------------------------------'
+        ].join('\n')
+      );
+      return;
+    }
+    this.cycleCounters.validated++;
+    
+    getLogger().debug(`Transaction validated: user=${raw.userName} amount=${raw.amount}`);
+    
+    const fingerprint = this.fingerprintGen.generate(raw);
+    this.cycleCounters.fingerprintsCreated++;
+    
+    if (this.processedInCycle.has(fingerprint)) {
+      this.cycleCounters.duplicates++;
+      return;
+    }
+    
+    this.setState('CHECKING_DUPLICATES');
+    if (this.isDuplicate(fingerprint)) {
+      getLogger().debug(`Duplicate detected: ${fingerprint.slice(0, 12)}…`);
+      this.cycleCounters.duplicates++;
+      return;
+    }
+    
+    this.setState('BUFFERING');
+    const transaction: Transaction = {
+      ...raw,
+      transactionFingerprint: fingerprint,
+      filterProfile: filter.name,
+      exportStatus: 'pending'
+    };
+    
+    this.buffer.push(transaction);
+    this.bufferFingerprints.add(fingerprint);
+    this.processedInCycle.add(fingerprint);
+    this.cachedFingerprints.add(fingerprint);
+    this.cycleCounters.buffered++;
+    this.exportStats.newTransactions++;
+    
+    getLogger().info(`Buffered new transaction (buffer size: ${this.buffer.length})`);
+    
+    const batchSize = this.config?.monitoring.batchSize || 1000;
+    if (this.buffer.length >= batchSize) {
+      await this.exportBuffer();
+    }
+  }
+  
+  private isDuplicate(fingerprint: string): boolean {
+    return this.cachedFingerprints.has(fingerprint) || this.bufferFingerprints.has(fingerprint);
+  }
+  
+  /**
+   * Export the current buffer using a write-ahead pattern:
+   *   1. Persist ALL buffered rows to SQLite as `pending` first.
+   *   2. Append to Google Sheets.
+   *   3. On success, mark those SQLite rows `exported`.
+   *   4. On failure, keep them in SQLite (`pending`) and stage them in the
+   *      retry queue for the next cycle. Never lose transactions in RAM.
+   *
+   * This shrinks the data-loss window to zero for anything that reaches the
+   * buffer, without changing the export batching or duplicate-detection
+   * strategy (SQLite fingerprints + in-memory buffer set — unchanged).
+   */
+  private async exportBuffer(): Promise<void> {
+    if (this.buffer.length === 0) return;
+    
+    this.setState('EXPORTING');
+    const logger = getLogger();
+    const count = this.buffer.length;
+    const batch = this.buffer;
+    const fingerprints = batch.map(t => t.transactionFingerprint);
+    
+    // Step 1: SQLite write-ahead persistence.
+    logger.info(`[STAGE] SQLite write-ahead persist: attempting ${count} row(s)…`);
+    try {
+      await this.sqliteService.insertTransactions(batch);
+      this.cycleCounters.sqliteInserted += count;
+      logger.info(`[STAGE] SQLite write-ahead persist: SUCCESS (${count} row(s) inserted as 'pending')`);
+    } catch (persistErr: any) {
+      logger.error(`[STAGE] SQLite write-ahead persist: FAILED — ${persistErr?.message || persistErr}`);
+      this.retryQueue.push(...batch);
+      throw persistErr;
+    }
+    
+    // Step 2: Google Sheets append — but only when the client is configured.
+    // Sheets not being connected is a legitimate deployment state (fresh
+    // install, credential rotation) and MUST NOT lose transactions — they
+    // remain in SQLite as `pending` and export on the next cycle after
+    // credentials are configured.
+    if (!this.googleSheetsService.isConnected()) {
+      logger.warn(
+        `[STAGE] Google Sheets Batch Append: SKIPPED — Sheets not connected. ` +
+        `${count} row(s) persisted as 'pending' in SQLite; they will export automatically ` +
+        `once Google Sheets credentials are configured (Settings → Google Sheets).`
+      );
+      // Move to retry queue so next cycle picks them up.
+      this.retryQueue.push(...batch);
+      this.buffer = [];
+      this.bufferFingerprints.clear();
+      return;
+    }
+    
+    try {
+      logger.info(`[STAGE] Google Sheets Batch Append: starting for ${count} row(s)…`);
+      const exportResult = await this.googleSheetsService.appendTransactions(batch);
+      this.cycleCounters.sheetsAppended += count;
+      logger.info(
+        `[STAGE] Google Sheets Batch Append: SUCCESS ` +
+        `(${count} row(s) → ${exportResult.destinationRange}, rows ${exportResult.startRow}..${exportResult.endRow})`
+      );
+      
+      this.setState('UPDATING_CACHE');
+      logger.info(`[STAGE] Mark Exported: updating ${count} SQLite row(s) → 'exported'…`);
+      await this.sqliteService.updateExportStatus(fingerprints, 'exported');
+      this.cycleCounters.markedExported += count;
+      logger.info(`[STAGE] Mark Exported: SUCCESS (${count} row(s) marked 'exported')`);
+      
+      // Advance the Resume Marker ONLY after both Sheets append and
+      // Mark-Exported have succeeded — a crash before either step leaves
+      // the marker at its previous value and the affected rows in the
+      // retry queue as 'pending', so the next cycle re-attempts the
+      // export end-to-end.
+      const newestKeyId = this.fingerprintGen.getShortFingerprint(
+        batch[batch.length - 1].transactionFingerprint
+      );
+      await this.sqliteService.saveResumeMarker(newestKeyId);
+      this.resumeMarker = newestKeyId;
+      logger.info(`[STAGE] Resume Marker advanced → KEY_ID=${newestKeyId}`);
+      
+      this.exportStats.lastExportTime = new Date();
+      this.exportStats.lastExportCount = count;
+      
+      this.buffer = [];
+      this.bufferFingerprints.clear();
+      logger.info(`[STAGE] Batch complete: ${count} transaction(s) fully exported end-to-end.`);
+      
+    } catch (error: any) {
+      logger.error(`[STAGE] Google Sheets Batch Append: FAILED — ${error?.message || error}`);
+      this.retryQueue.push(...batch);
+      this.buffer = [];
+      this.bufferFingerprints.clear();
+      throw error;
+    }
+  }
+  
+  private async updateExportStats(): Promise<void> {
+    this.exportStats.pendingQueueCount = this.buffer.length;
+    this.exportStats.retryQueueCount = this.retryQueue.length;
+    this.exportStats.successfulExportsToday = await this.sqliteService.getTodayExportCount();
+    this.exportStats.storedTransactions = await this.sqliteService.getStoredTransactionCount();
+    this.exportStats.loadedFingerprints = this.cachedFingerprints.size;
+    this.exportStats.sqliteConnected = this.sqliteService.isReady();
+    this.exportStats.googleSheetsConnected = this.googleSheetsService.isConnected();
+    this.exportStats.manualDateMode = this.config?.features.manualDateMode !== false;
+    this.exportStats.initialSyncMode = this.config?.features.initialSyncMode === true;
+    // Roll cycle counters into the running-today counters.
+    this.exportStats.transactionsScanned = this.cycleCounters.parsed;
+    this.exportStats.duplicatesSkipped = this.cycleCounters.duplicates;
+    this.exportStats.rejectedTransactions = this.cycleCounters.rejected;
+    // newTransactions is incremented per-buffer inside processTransaction.
+    
+    if (this.onStatsUpdate) {
+      this.onStatsUpdate({ ...this.exportStats });
+    }
+  }
+  
+  getExportStats(): ExportStats { return { ...this.exportStats }; }
+  getState(): MonitoringState { return this.state; }
+  isMonitoring(): boolean { return this.isRunning; }
+  
+  private setState(newState: MonitoringState): void {
+    this.state = newState;
+    if (this.onStateChange) this.onStateChange(newState);
+  }
+  
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+}

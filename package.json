@@ -1,0 +1,102 @@
+{
+  "name": "live-deposit-monitor",
+  "version": "1.0.0",
+  "description": "Live Deposit Monitoring System - Production Desktop Application",
+  "main": "dist/main/main/index.js",
+  "author": "Deposit Monitor Team",
+  "license": "MIT",
+  "scripts": {
+    "postinstall": "electron-builder install-app-deps",
+    "rebuild": "electron-builder install-app-deps",
+    "rebuild:native": "electron-rebuild -f -w better-sqlite3",
+    "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\" \"npm run start:dev\"",
+    "dev:main": "tsc -p tsconfig.main.json --watch",
+    "dev:renderer": "vite",
+    "start:dev": "wait-on http://localhost:5173 && wait-on dist/main/main/index.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
+    "build": "npm run build:main && npm run build:renderer",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "vite build",
+    "start": "electron .",
+    "dist": "npm run build && electron-builder --win --x64",
+    "dist:portable": "npm run build && electron-builder --win portable --x64",
+    "clean": "rimraf dist dist-build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.0",
+    "google-auth-library": "^9.6.3",
+    "googleapis": "^131.0.0",
+    "playwright": "^1.42.0",
+    "winston": "^3.11.0",
+    "winston-daily-rotate-file": "^5.0.0",
+    "zustand": "^4.5.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
+    "@types/better-sqlite3": "^7.6.9",
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.48",
+    "@types/react-dom": "^18.2.18",
+    "@types/react-window": "^1.8.8",
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.17",
+    "concurrently": "^8.2.2",
+    "cross-env": "^10.1.0",
+    "electron": "^28.2.0",
+    "electron-builder": "^24.9.1",
+    "postcss": "^8.4.33",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-hot-toast": "^2.4.1",
+    "react-window": "^1.8.10",
+    "rimraf": "^5.0.5",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.12",
+    "wait-on": "^9.1.0"
+  },
+  "build": {
+    "appId": "com.depositmonitor.app",
+    "productName": "Live Deposit Monitor",
+    "directories": {
+      "output": "dist-build",
+      "buildResources": "assets"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Live Deposit Monitor"
+    },
+    "portable": {
+      "artifactName": "LiveDepositMonitor-Portable.exe"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*",
+      "package.json",
+      "resources/**/*"
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**/*",
+      "**/*.node"
+    ]
+  }
+}

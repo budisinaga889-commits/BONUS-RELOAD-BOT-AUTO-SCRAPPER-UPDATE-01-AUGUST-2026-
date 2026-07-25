@@ -1,88 +1,32 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
-# IDE and editors
-.idea/
-.vscode/
-
-# Dependencies
 node_modules/
-/node_modules
-/.pnp
-.pnp.js
-.yarn/install-state.gz
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-
-# Testing
-/coverage
-
-# Next.js
-/.next/
-/out/
-next-env.d.ts
-*.tsbuildinfo
-
-# Production builds
-/build
 dist/
-dist
-
-# Environment files (comprehensive coverage)
-
-*token.json*
-*credentials.json*
-
-# Logs and debug files
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-dump.rdb
-
-# System files
+dist-build/
+*.log
 .DS_Store
-*.pem
-
-# Python
-__pycache__/
-*pyc*
-venv/
-.venv/
-
-# Development tools
-chainlit.md
-.chainlit
-.ipynb_checkpoints/
-.ac
-
-# Deployment
-.vercel
-
-# Data and databases
-agenthub/agents/youtube/db
-
-# Archive files and large assets
-**/*.zip
-**/*.tar.gz
-**/*.tar
-**/*.tgz
-*.pack
-*.deb
-*.dylib
-
-# Build caches
-.cache/
-
-memory/test_credentials.md
-
-# Mobile development
-android-sdk/
 .env
+.env.local
+.env.*.local
+*.tsbuildinfo
+.vscode/
+.idea/
 .env.*
 *.env
 credentials.json
+*.pem
 *.key
 .credentials
+
+# --- Emergent workspace artifacts (do NOT publish to GitHub) ---
+# These directories/files are managed by the Emergent platform and are
+# NOT part of the Electron application. They may be recreated at any
+# time by supervisor/watchers; keep them out of the pushed repository
+# so `git clone && npm install && npm run build && npm run dist:portable`
+# stays a clean, standalone Electron project.
+.emergent/
+frontend/
+backend/
+tests/
+memory/
+test_reports/
+test_result.md
+.ruff_cache/

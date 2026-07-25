@@ -1,0 +1,32 @@
+{
+  "version": "1.0.0",
+  "monitoring": {
+    "pollingInterval": 2,
+    "maxPageScan": 10,
+    "retryCount": 3,
+    "requestTimeout": 10000,
+    "browserTimeout": 30000,
+    "batchSize": 1000,
+    "maxCache": 10000
+  },
+  "browser": {
+    "profileDirectory": "browser-profile",
+    "persistentContext": true,
+    "headless": false,
+    "openDevTools": false,
+    "zoom": 1.0
+  },
+  "database": {
+    "cleanupDays": 7
+  },
+  "logging": {
+    "level": "info",
+    "maxSize": "20m",
+    "maxFiles": "14d"
+  },
+  "features": {
+    "screenshotOnError": false,
+    "autoResume": true,
+    "autoReconnect": true
+  }
+}
