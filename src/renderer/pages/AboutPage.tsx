@@ -1,63 +1,41 @@
 import React from 'react';
+import InfoCard, { InfoRow } from '../components/InfoCard';
 
 const AboutPage: React.FC = () => {
   return (
-    <div className="space-y-6" data-testid="about-page">
-      <h1 className="text-2xl font-bold">About</h1>
-      
-      <section className="bg-bg-secondary rounded-lg p-6 border border-border-color">
-        <div className="text-center mb-6">
-          <h2 className="text-3xl font-bold mb-2">Live Deposit Monitor</h2>
-          <p className="text-text-secondary">Production-Grade Desktop Monitoring System</p>
+    <div className="space-y-5 max-w-3xl" data-testid="about-page">
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded bg-accent-primary flex items-center justify-center text-white text-lg font-bold">L</div>
+        <div>
+          <h1 className="text-xl font-semibold">Live Deposit Monitor</h1>
+          <p className="text-xs text-text-tertiary">Production-grade desktop monitoring system</p>
         </div>
-        
-        <div className="space-y-3">
-          <div className="flex justify-between border-b border-border-color pb-2">
-            <span className="text-text-secondary">Application Version</span>
-            <span className="font-mono">1.0.0</span>
-          </div>
-          <div className="flex justify-between border-b border-border-color pb-2">
-            <span className="text-text-secondary">Build Version</span>
-            <span className="font-mono">production</span>
-          </div>
-          <div className="flex justify-between border-b border-border-color pb-2">
-            <span className="text-text-secondary">Electron Version</span>
-            <span className="font-mono">28.2.0</span>
-          </div>
-          <div className="flex justify-between border-b border-border-color pb-2">
-            <span className="text-text-secondary">Node Version</span>
-            <span className="font-mono">20.x</span>
-          </div>
-          <div className="flex justify-between border-b border-border-color pb-2">
-            <span className="text-text-secondary">React Version</span>
-            <span className="font-mono">18.2.0</span>
-          </div>
-          <div className="flex justify-between border-b border-border-color pb-2">
-            <span className="text-text-secondary">Playwright Version</span>
-            <span className="font-mono">1.42.0</span>
-          </div>
-          <div className="flex justify-between border-b border-border-color pb-2">
-            <span className="text-text-secondary">Database Schema Version</span>
-            <span className="font-mono">1</span>
-          </div>
-        </div>
-      </section>
-      
-      <section className="bg-bg-secondary rounded-lg p-6 border border-border-color">
-        <h3 className="text-lg font-semibold mb-3">Features</h3>
-        <ul className="space-y-2 text-sm text-text-secondary">
-          <li>✅ Read-only deposit transaction monitoring</li>
-          <li>✅ Priority-based filter profiles (first-match-wins)</li>
-          <li>✅ Adaptive pagination (Process Date comparison)</li>
-          <li>✅ SHA-1 fingerprint deduplication</li>
-          <li>✅ Two-stage duplicate detection</li>
-          <li>✅ Google Sheets batch export</li>
-          <li>✅ Persistent browser sessions</li>
-          <li>✅ 24/7 continuous monitoring</li>
-          <li>✅ Auto-recovery after crashes</li>
-          <li>✅ System tray integration</li>
+      </div>
+
+      <InfoCard title="Version Info">
+        <InfoRow label="Application Version"><span className="font-mono">1.0.0</span></InfoRow>
+        <InfoRow label="Build"><span className="font-mono">production</span></InfoRow>
+        <InfoRow label="Electron"><span className="font-mono">28.3.3</span></InfoRow>
+        <InfoRow label="Node (embedded)"><span className="font-mono">18.18.2</span></InfoRow>
+        <InfoRow label="React"><span className="font-mono">18.2.0</span></InfoRow>
+        <InfoRow label="Playwright"><span className="font-mono">1.42.0</span></InfoRow>
+        <InfoRow label="Database Schema"><span className="font-mono">1</span></InfoRow>
+      </InfoCard>
+
+      <InfoCard title="Feature Highlights">
+        <ul className="space-y-1.5 text-sm text-text-secondary">
+          <li>• Read-only deposit transaction monitoring</li>
+          <li>• Priority-based filter profiles (first-match-wins)</li>
+          <li>• Adaptive pagination (Process Date comparison)</li>
+          <li>• SHA-1 fingerprint deduplication</li>
+          <li>• Two-stage duplicate detection</li>
+          <li>• Google Sheets batch export</li>
+          <li>• Persistent browser sessions</li>
+          <li>• 24/7 continuous monitoring</li>
+          <li>• Auto-recovery after crashes</li>
+          <li>• System tray integration</li>
         </ul>
-      </section>
+      </InfoCard>
     </div>
   );
 };

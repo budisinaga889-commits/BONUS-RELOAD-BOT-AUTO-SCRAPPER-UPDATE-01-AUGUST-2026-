@@ -50,5 +50,10 @@ export class AppDirectoryManager {
   getFilterProfilesPath(): string { return path.join(this.getConfigDir(), 'filter-profiles.json'); }
   getGoogleSheetsConfigPath(): string { return path.join(this.getConfigDir(), 'google-sheets.json'); }
   getCredentialFilePath(): string { return path.join(this.getCredentialsDir(), 'google-service-account.json'); }
+  /**
+   * Path to the UI state file (window bounds, last active page).
+   * Renderer/UI concerns ONLY — never read by the monitoring engine.
+   */
+  getUiStatePath(): string { return path.join(this.getConfigDir(), 'ui-state.json'); }
   isPortableMode(): boolean { return this.isPortable; }
 }

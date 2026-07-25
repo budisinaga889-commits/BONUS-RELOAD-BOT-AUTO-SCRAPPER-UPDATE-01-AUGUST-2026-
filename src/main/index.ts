@@ -61,6 +61,7 @@ async function initializeApp() {
   await monitoringEngine.initialize();
   
   windowManager = new WindowManager();
+  windowManager.setAppDirManager(appDirManager);
   windowManager.createMainWindow();
   
   // Stream every log entry (Winston + broadcast) to the renderer's Live Log panel.
