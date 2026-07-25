@@ -1,17 +1,16 @@
 import React, { useMemo } from 'react';
 import { useLiveLogs } from '../hooks/useLiveLogs';
+import { EventIcon } from './CardIcons';
 
 /**
- * MonitoringTimeline — iteration 11.1 refinement.
+ * MonitoringTimeline — iteration 11.2 refinement:
+ *   - Semantic SVG icon per event kind (start/stop/apply/applied/skip/cycle/export/error)
+ *   - 3-px semantic-color strip on the left of each row
+ *   - Timestamp + label + optional detail, single flex-row per event
  *
- * Row-based layout: a 3-px vertical strip on the left (semantic color)
- * + timestamp + label + optional detail. Reads more premium than a dot
- * on a vertical line and is a single flex row per event (no absolute
- * positioning), which is also easier for React to reconcile cheaply.
- *
- * Backend log stream is unchanged — this component only parses events
- * from the existing message strings emitted by MonitoringEngine and
- * PlaywrightService today.
+ * Backend log stream is untouched. This component only parses events
+ * from message strings already emitted by MonitoringEngine and
+ * PlaywrightService.
  */
 interface TimelineEvent {
   time: Date;
@@ -27,27 +26,27 @@ function parseEvent(msg: string): { kind: TimelineEvent['kind']; label: string; 
   if (/^Starting monitoring/i.test(m))   return { kind: 'start', label: 'Monitoring started' };
   if (/^Stopping monitoring/i.test(m))   return { kind: 'stop',  label: 'Monitoring stopped' };
   const applying = m.match(/^Applying filter:\s+([^(]+)\s*\(/);
-  if (applying)                          return { kind: 'filter-applying', label: applying[1].trim(), detail: 'applying filter…' };
+  if (applying)                          return { kind: 'filter-applying', label: applying[1].trim(), detail: 'applying…' };
   const applied = m.match(/^Filter applied:\s+(.+)$/);
   if (applied)                           return { kind: 'filter-applied', label: applied[1].trim(), detail: 'filter applied' };
   const unavailable = m.match(/\[FILTER PROFILE\]\s+([^—-]+)—?\s*NOT AVAILABLE/);
-  if (unavailable)                       return { kind: 'filter-unavailable', label: unavailable[1].trim(), detail: 'unavailable — skipped' };
+  if (unavailable)                       return { kind: 'filter-unavailable', label: unavailable[1].trim(), detail: 'not available — skipped' };
   const cycleDone = m.match(/Monitoring cycle completed in (\d+)ms/);
   if (cycleDone)                         return { kind: 'cycle-done', label: 'Cycle completed', detail: `${cycleDone[1]} ms` };
   const sheets = m.match(/Google Sheets Batch Append: SUCCESS \((\d+) row/);
-  if (sheets)                            return { kind: 'exported', label: 'Sheets export', detail: `${sheets[1]} row(s) appended` };
+  if (sheets)                            return { kind: 'exported', label: 'Sheets export', detail: `${sheets[1]} row(s)` };
   return null;
 }
 
-const kindStyle: Record<TimelineEvent['kind'], { strip: string; label: string }> = {
-  start:                { strip: 'bg-emerald-400', label: 'text-emerald-300' },
-  stop:                 { strip: 'bg-gray-500',    label: 'text-gray-300' },
-  'filter-applying':    { strip: 'bg-sky-400',     label: 'text-sky-300' },
-  'filter-applied':     { strip: 'bg-emerald-400', label: 'text-emerald-300' },
-  'filter-unavailable': { strip: 'bg-amber-400',   label: 'text-amber-300' },
-  'cycle-done':         { strip: 'bg-emerald-400', label: 'text-emerald-300' },
-  exported:             { strip: 'bg-emerald-400', label: 'text-emerald-300' },
-  error:                { strip: 'bg-rose-400',    label: 'text-rose-300' },
+const kindStyle: Record<TimelineEvent['kind'], { strip: string; text: string; icon: React.ReactNode }> = {
+  start:                { strip: 'bg-emerald-400', text: 'text-emerald-300', icon: <EventIcon.start />       },
+  stop:                 { strip: 'bg-gray-500',    text: 'text-gray-300',    icon: <EventIcon.stop />        },
+  'filter-applying':    { strip: 'bg-sky-400',     text: 'text-sky-300',     icon: <EventIcon.applying />    },
+  'filter-applied':     { strip: 'bg-emerald-400', text: 'text-emerald-300', icon: <EventIcon.applied />     },
+  'filter-unavailable': { strip: 'bg-amber-400',   text: 'text-amber-300',   icon: <EventIcon.unavailable /> },
+  'cycle-done':         { strip: 'bg-emerald-400', text: 'text-emerald-300', icon: <EventIcon.cycle />       },
+  exported:             { strip: 'bg-emerald-400', text: 'text-emerald-300', icon: <EventIcon.export />      },
+  error:                { strip: 'bg-rose-400',    text: 'text-rose-300',    icon: <EventIcon.error />       },
 };
 
 const MonitoringTimeline: React.FC = () => {
@@ -81,18 +80,16 @@ const MonitoringTimeline: React.FC = () => {
               <li
                 key={i}
                 data-testid="timeline-event"
-                className="flex items-center gap-2 pl-2 pr-2 py-1.5 rounded hover:bg-white/[0.02] group border-l-[3px]"
-                style={{ borderLeftColor: 'transparent' }}
+                className="flex items-center gap-2 pl-1 pr-2 py-1.5 rounded hover:bg-white/[0.02]"
               >
                 <span className={`inline-block w-[3px] self-stretch rounded-full ${s.strip}`} />
-                <span className="text-[11px] font-mono tabular-nums text-text-tertiary w-14 shrink-0">
+                <span className={`shrink-0 ${s.text}`}>{s.icon}</span>
+                <span className="text-[10.5px] font-mono tabular-nums text-text-tertiary w-12 shrink-0">
                   {e.time.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </span>
-                <span className={`text-[12.5px] font-medium ${s.label} truncate`}>
-                  {e.label}
-                </span>
+                <span className={`text-[12px] font-medium ${s.text} truncate`}>{e.label}</span>
                 {e.detail && (
-                  <span className="ml-auto text-[11px] text-text-tertiary tabular-nums truncate max-w-[45%]">
+                  <span className="ml-auto text-[10.5px] text-text-tertiary tabular-nums truncate max-w-[42%]">
                     {e.detail}
                   </span>
                 )}
