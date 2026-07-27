@@ -470,6 +470,49 @@ export class PlaywrightService {
     (err as any).depositType = depositType;
     return err;
   }
+
+  /**
+   * Iteration 12 — read the currently-available Bank and Payment options
+   * from the deposit-transactions panel.
+   *
+   * This method is NEVER called from the monitoring cycle. It is only
+   * invoked when the operator explicitly opens the browser or clicks
+   * "Refresh Options" in the Filter Profiles page. It is read-only and
+   * never mutates the DOM.
+   *
+   * Returns:
+   *   { payment: string[]; bank: string[]; agent: string[]; }
+   * Missing dropdowns are returned as empty arrays (no error) so a
+   * panel that doesn't expose a Bank select still works.
+   */
+  async readFilterOptions(): Promise<{ payment: string[]; bank: string[]; agent: string[] }> {
+    if (!this.page) throw new Error('Browser not launched');
+    const readOptions = async (selector: string): Promise<string[]> => {
+      try {
+        await this.page!.waitForSelector(selector, { state: 'attached', timeout: 2000 });
+        const opts = await this.page!.$$eval(`${selector} option`, (nodes) =>
+          nodes.map((n) => {
+            const el = n as HTMLOptionElement;
+            const value = (el.value || '').trim();
+            const text = ((el.textContent || '').trim());
+            return { value, text };
+          })
+        );
+        const values = opts
+          .map(o => o.value || o.text)
+          .filter(v => v && v.toLowerCase() !== 'all' && v !== '');
+        return Array.from(new Set(values));
+      } catch {
+        return [];
+      }
+    };
+    const [payment, bank, agent] = await Promise.all([
+      readOptions(SELECTORS.FILTER.DEPOSIT_TYPE),
+      readOptions('#bank'),
+      readOptions('#deposit-agent-name'),
+    ]);
+    return { payment, bank, agent };
+  }
   
   async captureErrorScreenshot(errorContext: string): Promise<string | null> {
     if (!this.page) return null;

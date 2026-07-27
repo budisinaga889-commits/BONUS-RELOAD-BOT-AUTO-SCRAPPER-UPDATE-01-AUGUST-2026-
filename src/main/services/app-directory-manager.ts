@@ -55,5 +55,16 @@ export class AppDirectoryManager {
    * Renderer/UI concerns ONLY — never read by the monitoring engine.
    */
   getUiStatePath(): string { return path.join(this.getConfigDir(), 'ui-state.json'); }
+
+  /** Iteration 12 additions — all UI/maintenance concerns. Never read
+   *  by the monitoring engine, scraping pipeline, or SQLite schema. */
+  getBackupsDir(): string {
+    const p = path.join(this.baseDir, 'backups');
+    if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+    return p;
+  }
+  getFilterOptionsCachePath(): string { return path.join(this.getConfigDir(), 'filter-options-cache.json'); }
+  getBrowserProfilePath(): string { return this.getBrowserProfileDir(); }
+
   isPortableMode(): boolean { return this.isPortable; }
 }

@@ -1,7 +1,7 @@
 import React from 'react';
 import { CardIcon } from './CardIcons';
 
-type Page = 'monitoring' | 'filters' | 'google' | 'settings' | 'logs' | 'about';
+type Page = 'monitoring' | 'filters' | 'google' | 'settings' | 'logs' | 'about' | 'maintenance';
 
 interface SidebarProps {
   currentPage: Page;
@@ -9,7 +9,6 @@ interface SidebarProps {
 }
 
 interface NavItem { id: Page; label: string; icon: React.ReactNode; }
-interface PlaceholderItem { id: string; label: string; icon: React.ReactNode; hint: string; }
 
 const workspace: NavItem[] = [
   { id: 'monitoring', label: 'Monitoring',      icon: <CardIcon.monitoring /> },
@@ -20,10 +19,8 @@ const workspace: NavItem[] = [
   { id: 'about',      label: 'About',           icon: <CardIcon.timeline />   },
 ];
 
-// Iteration 12 will implement Maintenance & Operations. We reserve the
-// slot now so the sidebar geometry does not shift when it lands.
-const systemPlaceholders: PlaceholderItem[] = [
-  { id: 'maintenance', label: 'Maintenance', icon: <CardIcon.wrench />, hint: 'Coming in v1.1' },
+const systemItems: NavItem[] = [
+  { id: 'maintenance', label: 'Maintenance', icon: <CardIcon.wrench /> },
 ];
 
 const Sidebar: React.FC<SidebarProps> = ({ currentPage, onPageChange }) => {
@@ -89,23 +86,27 @@ const Sidebar: React.FC<SidebarProps> = ({ currentPage, onPageChange }) => {
           System
         </div>
         <ul className="space-y-[2px]">
-          {systemPlaceholders.map(item => (
-            <li key={item.id}>
-              <button
-                disabled
-                data-testid={`sidebar-${item.id}-placeholder`}
-                className="w-full h-[30px] pl-1 pr-2 flex items-center gap-2 rounded-md text-left text-[12.5px] text-text-muted opacity-70 cursor-not-allowed"
-                title={item.hint}
-              >
-                <span className="inline-block w-[2px] h-4 rounded-sm bg-transparent" />
-                <span className="text-text-muted">{item.icon}</span>
-                <span className="font-medium truncate">{item.label}</span>
-                <span className="ml-auto text-[9px] uppercase tracking-wider px-1 py-[1px] rounded bg-white/[0.03] border border-border-color text-text-muted">
-                  Soon
-                </span>
-              </button>
-            </li>
-          ))}
+          {systemItems.map(item => {
+            const active = currentPage === item.id;
+            return (
+              <li key={item.id}>
+                <button
+                  data-testid={`sidebar-${item.id}`}
+                  aria-current={active ? 'page' : undefined}
+                  onClick={() => onPageChange(item.id)}
+                  className={`w-full h-[30px] pl-1 pr-2 flex items-center gap-2 rounded-md text-left text-[12.5px] transition-colors ${
+                    active
+                      ? 'bg-accent-subtle text-white'
+                      : 'text-text-secondary hover:bg-white/[0.03] hover:text-text-primary'
+                  }`}
+                >
+                  <span className={`inline-block w-[2px] h-4 rounded-sm ${active ? 'bg-accent-primary' : 'bg-transparent'}`} />
+                  <span className={active ? 'text-accent-primary' : 'text-text-tertiary'}>{item.icon}</span>
+                  <span className="font-medium truncate">{item.label}</span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </nav>
 

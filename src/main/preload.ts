@@ -48,5 +48,41 @@ contextBridge.exposeInMainWorld('electron', {
     // Return an unsubscribe so React effects can clean up on unmount.
     return () => ipcRenderer.removeListener('log:entry', listener);
   },
-  getRecentLogs: (limit?: number) => ipcRenderer.invoke('logs:get-recent', limit)
+  getRecentLogs: (limit?: number) => ipcRenderer.invoke('logs:get-recent', limit),
+
+  // -------- Iteration 12 --------
+  // Maintenance
+  maintDbHealth:         () => ipcRenderer.invoke('maintenance:db-health'),
+  maintVacuum:           () => ipcRenderer.invoke('maintenance:vacuum'),
+  maintAnalyze:          () => ipcRenderer.invoke('maintenance:analyze'),
+  maintReindex:          () => ipcRenderer.invoke('maintenance:reindex'),
+  maintCleanupPreview:   (days: number) => ipcRenderer.invoke('maintenance:cleanup-preview', days),
+  maintCleanupExecute:   (days: number) => ipcRenderer.invoke('maintenance:cleanup-execute', days),
+  maintResumeGet:        () => ipcRenderer.invoke('maintenance:resume-get'),
+  maintResumeSet:        (v: string) => ipcRenderer.invoke('maintenance:resume-set', v),
+  maintResumeReset:      () => ipcRenderer.invoke('maintenance:resume-reset'),
+  maintBackupList:       () => ipcRenderer.invoke('maintenance:backup-list'),
+  maintBackupCreate:     (mode: 'db-only' | 'full') => ipcRenderer.invoke('maintenance:backup-create', mode),
+  maintBackupRestore:    (path: string) => ipcRenderer.invoke('maintenance:backup-restore', path),
+  maintLogsOpen:         () => ipcRenderer.invoke('maintenance:logs-open'),
+  maintLogsClear:        () => ipcRenderer.invoke('maintenance:logs-clear'),
+  maintLogsExport:       () => ipcRenderer.invoke('maintenance:logs-export'),
+  maintDiagReport:       () => ipcRenderer.invoke('maintenance:diagnostic-report'),
+  maintDiagSave:         (format: 'txt' | 'json') => ipcRenderer.invoke('maintenance:diagnostic-save', { format }),
+  maintRetryQueue:       () => ipcRenderer.invoke('maintenance:retry-queue'),
+  // Reset
+  resetWindowLayout:     () => ipcRenderer.invoke('reset:window-layout'),
+  resetUiPreferences:    () => ipcRenderer.invoke('reset:ui-preferences'),
+  resetCachedMetadata:   () => ipcRenderer.invoke('reset:cached-metadata'),
+  resetPanelSession:     () => ipcRenderer.invoke('reset:panel-session'),
+  resetLocalConfig:      () => ipcRenderer.invoke('reset:local-config'),
+  resetFull:             (opts: { keepFilterProfiles: boolean; keepGoogleConfig: boolean }) => ipcRenderer.invoke('reset:full', opts),
+  // Filter Options
+  filterOptionsCache:    () => ipcRenderer.invoke('filter-options:read-cache'),
+  filterOptionsRefresh:  () => ipcRenderer.invoke('filter-options:refresh'),
+  // Config Management
+  exportConfiguration:   () => ipcRenderer.invoke('config:export'),
+  importConfiguration:   () => ipcRenderer.invoke('config:import'),
+  // App restart helper
+  restartApp:            () => ipcRenderer.invoke('app:restart')
 });

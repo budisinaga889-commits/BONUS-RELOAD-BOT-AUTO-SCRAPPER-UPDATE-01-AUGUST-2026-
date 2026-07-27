@@ -8,12 +8,13 @@ import GoogleSheetsPage from './pages/GoogleSheetsPage';
 import SettingsPage from './pages/SettingsPage';
 import LogsPage from './pages/LogsPage';
 import AboutPage from './pages/AboutPage';
+import MaintenancePage from './pages/MaintenancePage';
 import { useMonitoringStore } from './store/monitoring-store';
 
-type Page = 'monitoring' | 'filters' | 'google' | 'settings' | 'logs' | 'about';
+type Page = 'monitoring' | 'filters' | 'google' | 'settings' | 'logs' | 'about' | 'maintenance';
 
 const PAGE_KEY = 'ldm.ui.lastActivePage';
-const VALID_PAGES: Page[] = ['monitoring', 'filters', 'google', 'settings', 'logs', 'about'];
+const VALID_PAGES: Page[] = ['monitoring', 'filters', 'google', 'settings', 'logs', 'about', 'maintenance'];
 
 function loadInitialPage(): Page {
   try {
@@ -45,9 +46,10 @@ const App: React.FC = () => {
       case 'filters':    return <FilterProfilesPage />;
       case 'google':     return <GoogleSheetsPage />;
       case 'settings':   return <SettingsPage />;
-      case 'logs':       return <LogsPage />;
-      case 'about':      return <AboutPage />;
-      default:           return <MonitoringPage />;
+      case 'logs':        return <LogsPage />;
+      case 'about':       return <AboutPage />;
+      case 'maintenance': return <MaintenancePage />;
+      default:            return <MonitoringPage />;
     }
   };
 

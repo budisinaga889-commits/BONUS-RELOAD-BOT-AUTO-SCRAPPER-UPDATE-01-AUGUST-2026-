@@ -175,7 +175,16 @@ export class SQLiteService {
     if (!this.db) throw new Error('Database not initialized');
     this.db.prepare('VACUUM').run();
   }
-  
+
+  /**
+   * Read-only accessor exposed for MaintenanceService (iteration 12).
+   * Do NOT use this from the monitoring engine or scraping pipeline —
+   * schema access continues to flow through the typed methods above.
+   */
+  getDb(): Database.Database | null {
+    return this.db;
+  }
+
   isReady(): boolean {
     return this.db !== null;
   }
