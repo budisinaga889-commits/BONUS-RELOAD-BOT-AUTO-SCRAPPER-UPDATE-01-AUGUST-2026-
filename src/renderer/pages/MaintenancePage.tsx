@@ -100,6 +100,7 @@ const MaintenancePage: React.FC = () => {
   };
 
   const doPreviewCleanup = async () => {
+    if (!window.electron?.maintCleanupPreview) { toast.error('Not available in this build'); return; }
     const days = cleanupDays === -1 ? customDays : cleanupDays;
     const r = await window.electron.maintCleanupPreview(days);
     if (r?.success) setCleanupPreview({ ...r.data, days });
