@@ -21,12 +21,40 @@ export interface PageStats {
   exported: number;
 }
 
+/**
+ * PATCH 12 — Scan termination classification.
+ *
+ * Distinguishes benign end-of-scan conditions (which MUST NOT discard
+ * transactions already collected) from genuine navigation/browser
+ * failures (which are still cycle-fatal). Kept as a string union to
+ * remain compatible with existing pass-by-value plumbing.
+ */
+export type ScanTerminationReason =
+  | 'END_OF_PAGINATION'   // reached the actual last page (Next disabled/missing/loops)
+  | 'MAX_SCAN_REACHED'    // configured maxPageScan hit
+  | 'FULL_DUPLICATE_PAGE' // first page where every parsed row is already known
+  | 'STOP_REQUESTED'      // operator hit Stop Monitoring
+  | 'NAVIGATION_FAILURE'  // click did not land on expected page (real DOM/browser issue)
+  | 'BROWSER_FAILURE';    // browser crashed, page unavailable, no HTML
+
 export interface ScanResult {
   transactions: RawTransaction[];
   /** One entry per scanned page, in traversal order. */
   perPage: PageStats[];
-  /** True when scanning stopped because navigation verification failed. */
+  /**
+   * True when scanning stopped because navigation verification failed.
+   * PATCH 12: Kept for backwards compatibility with any external caller,
+   * but callers should prefer `terminationReason` — this flag is now ONLY
+   * set for the real fatal cases (NAVIGATION_FAILURE / BROWSER_FAILURE),
+   * never for END_OF_PAGINATION.
+   */
   navigationFailure: boolean;
+  /** PATCH 12 — classified termination reason (see ScanTerminationReason). */
+  terminationReason: ScanTerminationReason;
+  /** PATCH 12 — highest page number the scanner actually parsed rows on. */
+  lastPageScanned: number;
+  /** PATCH 12 — configured maxPageScan passed into this run (echoed back for logging). */
+  configuredMaxPage: number;
 }
 
 export class PageScanner {
@@ -84,6 +112,8 @@ export class PageScanner {
     const allTransactions: RawTransaction[] = [];
     const perPage: PageStats[] = [];
     let navigationFailure = false;
+    let terminationReason: ScanTerminationReason = 'END_OF_PAGINATION';
+    let lastPageScanned = 0;
     let scanned = 0;
     
     logger.info(`Starting scan for filter: ${filter.name} (maxPageScan=${maxPages})`);
@@ -93,6 +123,7 @@ export class PageScanner {
       // parsing a fresh page or issuing another pagination click.
       if (this.shouldStop()) {
         logger.info(`Stop requested — exiting scan after ${scanned} page(s).`);
+        terminationReason = 'STOP_REQUESTED';
         break;
       }
       
@@ -182,13 +213,18 @@ export class PageScanner {
       };
       perPage.push(pageStats);
       scanned++;
+      lastPageScanned = currentBrowserPage;
       
-      if (stopByDuplicatePage) break;
+      if (stopByDuplicatePage) {
+        terminationReason = 'FULL_DUPLICATE_PAGE';
+        break;
+      }
       
       // Second stop-check: don't spend time navigating to the next page if
       // the operator hit Stop while we were parsing.
       if (this.shouldStop()) {
         logger.info(`Stop requested — exiting scan after ${scanned} page(s), skipping pagination.`);
+        terminationReason = 'STOP_REQUESTED';
         break;
       }
       
@@ -196,13 +232,15 @@ export class PageScanner {
       // the operator-set limit (Bug #2).
       if (scanned >= maxPages) {
         logger.info(`Reached maxPageScan=${maxPages} — stopping pagination.`);
+        terminationReason = 'MAX_SCAN_REACHED';
         break;
       }
       
       // Check for a valid, enabled Next anchor scoped to the pagination widget.
-      const hasNext = await this.hasNextPage();
+      const hasNext = await this.hasNextPage(currentBrowserPage);
       if (!hasNext) {
-        logger.info('No more pages');
+        logger.info('No more pages — end of pagination reached.');
+        terminationReason = 'END_OF_PAGINATION';
         break;
       }
       
@@ -210,11 +248,25 @@ export class PageScanner {
       logger.info(`Moving to page ${expected}`);
       
       // Navigate and verify against BOTH URL and DOM widget.
+      // PATCH 12 — navigateAndVerify may return a benign END_OF_PAGINATION
+      // signal (throw with `endOfPagination=true`) when the click did not
+      // advance the widget but there is no genuine browser failure. Only
+      // real DOM/browser disagreements are treated as navigation failures.
       try {
         await this.navigateAndVerify(currentUrl, currentBrowserPage, expected);
       } catch (error: any) {
+        if (error && error.endOfPagination === true) {
+          logger.info(
+            `Pagination widget did not advance past page ${currentBrowserPage} — treating as End Of Pagination (${error.message}).`
+          );
+          terminationReason = 'END_OF_PAGINATION';
+          break;
+        }
         logger.error(`Pagination failed while moving to page ${expected}`, error);
         navigationFailure = true;
+        terminationReason = error && error.browserFailure === true
+          ? 'BROWSER_FAILURE'
+          : 'NAVIGATION_FAILURE';
         break;
       }
     }
@@ -222,7 +274,15 @@ export class PageScanner {
     logger.success(
       `Pagination completed: scanned ${scanned} page(s), found ${allTransactions.length} new transaction(s)`
     );
-    return { transactions: allTransactions, perPage, navigationFailure };
+    
+    return {
+      transactions: allTransactions,
+      perPage,
+      navigationFailure,
+      terminationReason,
+      lastPageScanned,
+      configuredMaxPage: maxPages
+    };
   }
   
   /**
@@ -250,31 +310,93 @@ export class PageScanner {
   }
   
   /**
-   * Return true only when the pagination widget contains an ENABLED Next
-   * anchor with a real (non-`#`) href. Scoped to the pagination container so
-   * an unrelated `rel="next"` elsewhere on the page cannot cause a false
-   * positive.
+   * PATCH 12 — Return true only when the pagination widget contains an
+   * ENABLED Next anchor pointing at a page STRICTLY greater than the
+   * current active page. Checks (in order, all must pass):
+   *
+   *   1. Pagination container exists.
+   *   2. There is at least one <a> whose href resolves to a page > current
+   *      OR a rel="next" anchor that is not marked disabled.
+   *   3. The candidate anchor is NOT inside an <li> flagged `disabled` /
+   *      `aria-disabled` / `active` / with text starting with the current
+   *      page (some Yii2 pagers render a phantom Next that just re-links to
+   *      the current page on the final page).
+   *   4. The candidate href is not `#`, empty, or `javascript:void(0)`.
+   *   5. No sibling "last page" marker (`.last.disabled`, `[data-last]`)
+   *      appears next to the widget.
+   *
+   * Callers still fall back gracefully if this returns false — that is
+   * treated as END_OF_PAGINATION, never as a navigation failure.
    */
-  private async hasNextPage(): Promise<boolean> {
+  private async hasNextPage(currentPage?: number): Promise<boolean> {
     try {
       return await this.page.evaluate(
-        ({ container, nextSel }: { container: string; nextSel: string }) => {
+        ({ container, nextSel, currentPage }: { container: string; nextSel: string; currentPage: number | null }) => {
           const boxes = Array.from(document.querySelectorAll(container));
           if (boxes.length === 0) return false;
+          
+          const isDisabledAnchor = (a: HTMLAnchorElement): boolean => {
+            if (a.getAttribute('aria-disabled') === 'true') return true;
+            if (a.hasAttribute('disabled')) return true;
+            const li = a.closest('li');
+            if (li) {
+              if (li.classList.contains('disabled')) return true;
+              if (li.classList.contains('active'))   return true; // Next-that-loops-to-self
+              if (li.getAttribute('aria-disabled') === 'true') return true;
+            }
+            return false;
+          };
+          const isJunkHref = (href: string): boolean => {
+            if (!href) return true;
+            const h = href.trim();
+            if (h === '' || h === '#') return true;
+            if (h.toLowerCase().startsWith('javascript:')) return true;
+            return false;
+          };
+          const extractHrefPage = (href: string): number | null => {
+            const q = (href.match(/[?&]page=(\d+)/) || [])[1];
+            if (q) return parseInt(q, 10);
+            const p = (href.match(/\/page\/(\d+)(?:\/|$)/) || [])[1];
+            if (p) return parseInt(p, 10);
+            return null;
+          };
+          
           for (const box of boxes) {
+            // A "last page indicator" nearby → definitely no next page.
+            if (box.querySelector('li.last.disabled, li[data-last="true"]')) continue;
+            
+            const anchors = Array.from(box.querySelectorAll('a')) as HTMLAnchorElement[];
+            
+            // Strategy A: a page-number anchor pointing STRICTLY beyond current.
+            if (currentPage !== null) {
+              for (const a of anchors) {
+                if (isDisabledAnchor(a)) continue;
+                const href = a.getAttribute('href') || '';
+                if (isJunkHref(href)) continue;
+                const p = extractHrefPage(href);
+                if (p !== null && p > currentPage) return true;
+              }
+            }
+            
+            // Strategy B: rel="next" (or matching next-selector) that is enabled AND
+            // whose href either has no page marker (relative pager) or points beyond current.
             const nexts = Array.from(box.querySelectorAll(nextSel)) as HTMLAnchorElement[];
             for (const a of nexts) {
-              if (a.getAttribute('aria-disabled') === 'true') continue;
-              const li = a.closest('li');
-              if (li && (li.classList.contains('disabled') || li.getAttribute('aria-disabled') === 'true')) continue;
+              if (isDisabledAnchor(a)) continue;
               const href = a.getAttribute('href') || '';
-              if (!href || href === '#' || href.trim() === '') continue;
+              if (isJunkHref(href)) continue;
+              const p = extractHrefPage(href);
+              if (currentPage !== null && p !== null && p <= currentPage) continue;
               return true;
             }
           }
           return false;
         },
-        { container: SELECTORS.PAGINATION.CONTAINER, nextSel: SELECTORS.PAGINATION.NEXT }
+        {
+          container: SELECTORS.PAGINATION.CONTAINER,
+          nextSel: SELECTORS.PAGINATION.NEXT,
+          currentPage: typeof currentPage === 'number' ? currentPage : null
+        }
       );
     } catch (e) {
       getLogger().warn('Failed to inspect pagination Next button', e);
@@ -334,8 +456,12 @@ export class PageScanner {
     );
     
     if (!clickInfo.clicked) {
-      const err: any = new Error(`Pagination click failed: ${clickInfo.reason} (target page ${expected})`);
-      err.isCycleFatal = true;
+      // PATCH 12 — No enabled anchor for the target page is NOT a browser
+      // failure; it just means the pager exhausted itself between hasNextPage()
+      // and the click. Surface as END_OF_PAGINATION so already-collected rows
+      // are exported normally.
+      const err: any = new Error(`No enabled Next anchor: ${clickInfo.reason} (target page ${expected})`);
+      err.endOfPagination = true;
       throw err;
     }
     
@@ -430,9 +556,28 @@ export class PageScanner {
     logger.diag(diagBlock);
     
     if (!ok) {
+      // PATCH 12 — Classify the failure:
+      //   • DOM widget still on the OLD page + URL unchanged  → the click did
+      //     not advance the pager. On the actual last page (Configured >
+      //     Available) this is exactly what happens: the anchor exists but
+      //     the widget refuses to move. Treat as END_OF_PAGINATION so the
+      //     engine exports what it already collected instead of aborting.
+      //   • Anything else (URL moved to a wrong page, DOM disagreed with
+      //     itself, page went blank) → real navigation failure, cycle fatal.
+      const pagerStuck =
+        (domPage === fromPage || domPage === null) &&
+        (urlPage === null || urlPage === fromPage) &&
+        actualUrl === fromUrl;
       logger.error(
         `Navigation verification failed. Expected page ${expected}, URL=${urlPage ?? 'n/a'}, DOM=${domPage ?? 'n/a'}. URL: ${actualUrl}`
       );
+      if (pagerStuck) {
+        const err: any = new Error(
+          `Pager did not advance past page ${fromPage} — treating as end of pagination.`
+        );
+        err.endOfPagination = true;
+        throw err;
+      }
       const err: any = new Error(
         `Navigation verification failed: expected ${expected}, urlPage=${urlPage ?? 'n/a'}, domPage=${domPage ?? 'n/a'} (${actualUrl})`
       );

@@ -243,7 +243,12 @@ export class PlaywrightService {
       await this.page.selectOption(SELECTORS.FILTER.DEPOSIT_STATUS, 'Approve');
       if (filter.depositType) {
         try {
-          await this.page.selectOption(SELECTORS.FILTER.DEPOSIT_TYPE, filter.depositType);
+          // PATCH 12 — always select by explicit VALUE. `filter.depositType`
+          // holds the option's `value` attribute (e.g. "286") — never the
+          // display label — so we must not let Playwright's default label-
+          // match kick in when a label like "Manual Deposit" would collide
+          // with a different bank listing the same word.
+          await this.page.selectOption(SELECTORS.FILTER.DEPOSIT_TYPE, { value: filter.depositType });
         } catch (e: any) {
           // The availability probe above already gated this branch, but
           // the option can theoretically disappear between probe and
@@ -472,6 +477,45 @@ export class PlaywrightService {
   }
 
   /**
+   * PATCH 12 — Generic dropdown reader (Patch 3).
+   *
+   * Read every <option> under `selector` as a `{ value, label }` pair.
+   *   • `value`  = the option's raw `value` attribute (used by Playwright
+   *                 `selectOption({ value })` when applying filters).
+   *   • `label`  = the option's visible `textContent`, trimmed.
+   *
+   * Empty-value / empty-label options are filtered out. The special
+   * "All" placeholder is preserved so the UI can render it as `— All —`
+   * (Patch 4). No de-duplication of values (duplicates from server-side
+   * templates are still passed through as-is).
+   *
+   * NEVER throws for a missing selector — a panel that doesn't expose a
+   * given <select> simply yields an empty array so callers can treat the
+   * field as free-text.
+   */
+  async readSelectOptions(selector: string): Promise<Array<{ value: string; label: string }>> {
+    if (!this.page) return [];
+    try {
+      await this.page.waitForSelector(selector, { state: 'attached', timeout: 2000 });
+      const opts = await this.page.$$eval(`${selector} option`, (nodes) =>
+        nodes.map((n) => {
+          const el = n as HTMLOptionElement;
+          return {
+            value: (el.value ?? '').trim(),
+            label: ((el.textContent ?? '').trim())
+          };
+        })
+      );
+      // Drop rows where BOTH value and label are empty. Keep every real
+      // option — including the "All" placeholder — because the UI needs
+      // the label to render "— All —".
+      return opts.filter(o => o.value !== '' || o.label !== '');
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Iteration 12 — read the currently-available Bank and Payment options
    * from the deposit-transactions panel.
    *
@@ -480,36 +524,20 @@ export class PlaywrightService {
    * "Refresh Options" in the Filter Profiles page. It is read-only and
    * never mutates the DOM.
    *
-   * Returns:
-   *   { payment: string[]; bank: string[]; agent: string[]; }
-   * Missing dropdowns are returned as empty arrays (no error) so a
-   * panel that doesn't expose a Bank select still works.
+   * PATCH 12 — return `{ value, label }` pairs so the UI can display
+   * human-readable labels while Playwright continues to use the option's
+   * raw value when `selectOption()` runs.
    */
-  async readFilterOptions(): Promise<{ payment: string[]; bank: string[]; agent: string[] }> {
+  async readFilterOptions(): Promise<{
+    payment: Array<{ value: string; label: string }>;
+    bank:    Array<{ value: string; label: string }>;
+    agent:   Array<{ value: string; label: string }>;
+  }> {
     if (!this.page) throw new Error('Browser not launched');
-    const readOptions = async (selector: string): Promise<string[]> => {
-      try {
-        await this.page!.waitForSelector(selector, { state: 'attached', timeout: 2000 });
-        const opts = await this.page!.$$eval(`${selector} option`, (nodes) =>
-          nodes.map((n) => {
-            const el = n as HTMLOptionElement;
-            const value = (el.value || '').trim();
-            const text = ((el.textContent || '').trim());
-            return { value, text };
-          })
-        );
-        const values = opts
-          .map(o => o.value || o.text)
-          .filter(v => v && v.toLowerCase() !== 'all' && v !== '');
-        return Array.from(new Set(values));
-      } catch {
-        return [];
-      }
-    };
     const [payment, bank, agent] = await Promise.all([
-      readOptions(SELECTORS.FILTER.DEPOSIT_TYPE),
-      readOptions('#bank'),
-      readOptions('#deposit-agent-name'),
+      this.readSelectOptions(SELECTORS.FILTER.DEPOSIT_TYPE),
+      this.readSelectOptions('#bank'),
+      this.readSelectOptions('#deposit-agent-name'),
     ]);
     return { payment, bank, agent };
   }

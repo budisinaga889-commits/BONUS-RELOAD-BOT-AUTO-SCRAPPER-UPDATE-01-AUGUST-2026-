@@ -5,6 +5,37 @@ import StatusBadge from '../components/StatusBadge';
 import InfoCard from '../components/InfoCard';
 import ConfirmDialog from '../components/ConfirmDialog';
 
+// PATCH 12 — every dropdown option is now transported as {value, label}.
+// `value` is what Playwright submits back to the panel via selectOption().
+// `label` is what the operator sees. Legacy caches (string[]) are
+// normalised on the main-process side so this component only handles
+// the new shape.
+interface Option { value: string; label: string; }
+interface OptionsCache {
+  payment: Option[];
+  bank: Option[];
+  agent: Option[];
+  lastRefreshed: string | null;
+}
+
+// PATCH 12 — format the cache timestamp as "YYYY-MM-DD HH:mm:ss" in local time.
+const formatLastRefreshed = (iso: string | null): string => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+         `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+
+// PATCH 12 — replace the raw "All" label with a visually-clear placeholder.
+// Everything else is rendered verbatim (Bank Transfer, E-Wallet, PGA, …).
+const displayLabel = (label: string): string => {
+  const l = (label || '').trim();
+  if (l.toLowerCase() === 'all') return '— All —';
+  return l;
+};
+
 const FilterProfilesPage: React.FC = () => {
   const [profiles, setProfiles] = useState<FilterProfile[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -16,7 +47,7 @@ const FilterProfilesPage: React.FC = () => {
     verified: '', status: '', done: '', firstDeposit: ''
   });
   const [deleteTarget, setDeleteTarget] = useState<FilterProfile | null>(null);
-  const [optionsCache, setOptionsCache] = useState<{ payment: string[]; bank: string[]; agent: string[]; lastRefreshed: string | null }>({ payment: [], bank: [], agent: [], lastRefreshed: null });
+  const [optionsCache, setOptionsCache] = useState<OptionsCache>({ payment: [], bank: [], agent: [], lastRefreshed: null });
   const [refreshingOptions, setRefreshingOptions] = useState(false);
 
   useEffect(() => { loadProfiles(); loadOptionsCache(); }, []);
@@ -90,14 +121,30 @@ const FilterProfilesPage: React.FC = () => {
 
   const paymentOptions = useMemo(() => optionsCache.payment || [], [optionsCache]);
   const bankOptions    = useMemo(() => optionsCache.bank    || [], [optionsCache]);
+  // PATCH 12 — value → label lookups used by both the table view (row
+  // rendering) and the dropdown "current value" fallback. When the cache
+  // is empty (e.g. fresh install before first Refresh Options) the raw
+  // value is displayed unchanged so nothing is lost.
+  const paymentLabel = useMemo(() => {
+    const m = new Map(paymentOptions.map(o => [o.value, o.label]));
+    return (v?: string) => (v && m.get(v)) ? displayLabel(m.get(v)!) : (v || '—');
+  }, [paymentOptions]);
+  const bankLabel = useMemo(() => {
+    const m = new Map(bankOptions.map(o => [o.value, o.label]));
+    return (v?: string) => (v && m.get(v)) ? displayLabel(m.get(v)!) : (v || '—');
+  }, [bankOptions]);
 
-  const DropdownOrInput: React.FC<{ label: string; value: string; onChange: (v: string) => void; options: string[]; testId?: string; }> = ({ label, value, onChange, options, testId }) => (
+  const DropdownOrInput: React.FC<{ label: string; value: string; onChange: (v: string) => void; options: Option[]; testId?: string; }> = ({ label, value, onChange, options, testId }) => (
     <div>
       <label className="block text-xs text-text-secondary mb-1">{label}</label>
       {options.length > 0 ? (
         <select value={value || ''} onChange={e => onChange(e.target.value)} className="w-full h-9 text-sm" data-testid={testId}>
-          <option value="">— None —</option>
-          {options.map(o => <option key={o} value={o}>{o}</option>)}
+          {/* PATCH 4 — use "— All —" as the neutral placeholder consistent
+              with the panel's own "All" option. */}
+          <option value="">— All —</option>
+          {options.map(o => (
+            <option key={o.value || o.label} value={o.value}>{displayLabel(o.label)}</option>
+          ))}
         </select>
       ) : (
         <input type="text" value={value || ''} onChange={e => onChange(e.target.value)} className="w-full h-9 text-sm" placeholder="Type value (Refresh Options to sync)" data-testid={testId} />
@@ -112,7 +159,16 @@ const FilterProfilesPage: React.FC = () => {
           <h1 className="text-xl font-semibold">Filter Profiles</h1>
           <p className="text-xs text-text-tertiary mt-0.5">{profiles.length} profile(s) — {profiles.filter(p => p.enabled).length} enabled</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
+          {/* PATCH 5 — Last Refreshed timestamp displayed right next to the
+              Refresh Options button, in YYYY-MM-DD HH:mm:ss format. */}
+          <span
+            data-testid="filter-options-last-refreshed"
+            className="text-[11px] text-text-tertiary font-mono tabular-nums whitespace-nowrap"
+            title="Cached options were last refreshed at this time"
+          >
+            Last Refreshed <span className="text-text-secondary">{formatLastRefreshed(optionsCache.lastRefreshed)}</span>
+          </span>
           <button data-testid="refresh-options-btn" onClick={refreshOptions} disabled={refreshingOptions}
                   className="h-9 px-3 text-sm bg-bg-tertiary text-text-primary rounded border border-border-color hover:border-border-strong disabled:opacity-45">
             {refreshingOptions ? 'Refreshing…' : 'Refresh Options'}
@@ -125,8 +181,7 @@ const FilterProfilesPage: React.FC = () => {
 
       <div className="text-[11px] text-text-tertiary">
         Cached options: Payment <span className="font-mono text-text-secondary">{paymentOptions.length}</span> ·
-        Bank <span className="font-mono text-text-secondary">{bankOptions.length}</span> ·
-        Last refreshed <span className="font-mono">{optionsCache.lastRefreshed ? new Date(optionsCache.lastRefreshed).toLocaleString() : '—'}</span>
+        Bank <span className="font-mono text-text-secondary">{bankOptions.length}</span>
         <span className="ml-2">Open the browser first, then click Refresh Options to sync from the live panel.</span>
       </div>
 
@@ -236,8 +291,8 @@ const FilterProfilesPage: React.FC = () => {
                   <td className="px-4 py-2.5 font-mono text-sm text-text-secondary">{profile.priority}</td>
                   <td className="px-4 py-2.5 font-medium text-sm">{profile.name}</td>
                   <td className="px-4 py-2.5 text-sm text-text-secondary">{profile.agent || '—'}</td>
-                  <td className="px-4 py-2.5 text-sm text-text-secondary">{profile.bank || '—'}</td>
-                  <td className="px-4 py-2.5 text-sm text-text-secondary">{profile.payment || profile.depositType || '—'}</td>
+                  <td className="px-4 py-2.5 text-sm text-text-secondary">{bankLabel(profile.bank)}</td>
+                  <td className="px-4 py-2.5 text-sm text-text-secondary">{paymentLabel(profile.payment || profile.depositType)}</td>
                   <td className="px-4 py-2.5">
                     <button onClick={() => handleToggle(profile)} className="focus:outline-none" title="Toggle enabled">
                       <StatusBadge tone={profile.enabled ? 'success' : 'neutral'} label={profile.enabled ? 'Enabled' : 'Disabled'} size="sm" />

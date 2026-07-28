@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, Menu } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { WindowManager } from './window-manager';
@@ -59,6 +59,13 @@ let trayManager: TrayManager;
 async function initializeApp() {
   const appDirManager = new AppDirectoryManager();
   const logger = initializeLogger(appDirManager.getLogsDir());
+
+  // PATCH 12 — Desktop UI Polish (Patch 6). Remove the default Electron
+  // application menu (File / Edit / View / Window / Help). The native
+  // Windows title bar is kept as-is; we do NOT introduce a custom title
+  // bar. Called BEFORE any BrowserWindow is created so no window ever
+  // renders the default menu, not even briefly during startup.
+  try { Menu.setApplicationMenu(null); } catch { /* non-fatal */ }
 
   logger.success('Application started');
   logger.info(`Mode: ${appDirManager.isPortableMode() ? 'PORTABLE' : 'INSTALLED'}`);

@@ -303,9 +303,38 @@ export function registerIPCHandlers(services: Services) {
   // --- Filter Options (Bank / Payment dropdowns) ------------
   const cachePath = services.appDirManager.getFilterOptionsCachePath();
   const fs2 = require('fs');
+  // PATCH 12 — normalise both the LEGACY cache shape (string[]) and the
+  // NEW shape ({value,label}[]) into {value,label}[] so the renderer only
+  // ever sees one shape. Existing installations that had the old cache
+  // format on disk continue to work without a manual refresh.
+  const normaliseOptions = (raw: any): Array<{ value: string; label: string }> => {
+    if (!Array.isArray(raw)) return [];
+    const out: Array<{ value: string; label: string }> = [];
+    for (const r of raw) {
+      if (typeof r === 'string') {
+        if (r) out.push({ value: r, label: r });
+        continue;
+      }
+      if (r && typeof r === 'object' && ('value' in r || 'label' in r)) {
+        const value = String(r.value ?? '');
+        const label = String(r.label ?? r.value ?? '');
+        if (value !== '' || label !== '') out.push({ value, label });
+      }
+    }
+    return out;
+  };
   ipcMain.handle('filter-options:read-cache', wrap(async () => {
-    try { return JSON.parse(fs2.readFileSync(cachePath, 'utf8')); }
-    catch { return { payment: [], bank: [], agent: [], lastRefreshed: null }; }
+    try {
+      const raw = JSON.parse(fs2.readFileSync(cachePath, 'utf8'));
+      return {
+        payment: normaliseOptions(raw?.payment),
+        bank:    normaliseOptions(raw?.bank),
+        agent:   normaliseOptions(raw?.agent),
+        lastRefreshed: raw?.lastRefreshed ?? null,
+      };
+    } catch {
+      return { payment: [], bank: [], agent: [], lastRefreshed: null };
+    }
   }));
   ipcMain.handle('filter-options:refresh', wrap(async () => {
     const opts = await services.playwrightService.readFilterOptions();

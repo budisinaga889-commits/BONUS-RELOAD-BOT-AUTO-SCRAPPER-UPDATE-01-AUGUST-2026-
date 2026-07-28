@@ -475,22 +475,56 @@ export class MonitoringEngine {
     }
     
     const maxPages = this.config?.monitoring.maxPageScan || 10;
+    // PATCH 12 — capture the `buffered` counter BEFORE processing so we can
+    // report how many rows this filter accepted into the export buffer.
+    // The actual Sheets-append count is reported later in the per-cycle
+    // pipeline audit block; the pagination summary here reports the
+    // downstream-ready count so the operator can immediately verify
+    // "collected pages > 0 → rows accepted > 0" (i.e. nothing was lost).
+    const bufferedBefore = this.cycleCounters.buffered;
     const result = await scanner.scanPages(filter, maxPages);
     
-    // If pagination navigation verification failed anywhere in the scan,
-    // treat it as CYCLE-FATAL: the browser state is unreliable, so we must
-    // not continue processing partial results or move to the next filter.
+    // PATCH 12 — Process every collected transaction FIRST, regardless of
+    // termination reason. Losing already-scanned rows because the pager
+    // couldn't advance past the actual last page is the exact production
+    // bug this patch fixes. `navigationFailure` remains reserved for
+    // genuine DOM/browser failures (see PageScanner classification).
+    for (const raw of result.transactions) {
+      if (!this.isRunning) break;
+      await this.processTransaction(raw, filter);
+    }
+    
+    // PATCH 12 — Pagination Summary. Emitted once per filter after every
+    // collected row has been handed off to the pipeline, so the operator
+    // can distinguish End Of Pagination from a real navigation failure and
+    // see exactly how many rows survived to the export buffer.
+    const bufferedThisFilter = this.cycleCounters.buffered - bufferedBefore;
+    getLogger().info(
+      '\n========== PAGINATION SUMMARY ==========\n' +
+      `  Filter Profile        : ${filter.name}\n` +
+      `  Configured Max Page   : ${result.configuredMaxPage}\n` +
+      `  Available Pages       : ${result.terminationReason === 'END_OF_PAGINATION' ? String(result.lastPageScanned) : `(not fully explored, stopped at ${result.lastPageScanned})`}\n` +
+      `  Pages Scanned         : ${result.perPage.length}\n` +
+      `  Termination Reason    : ${result.terminationReason}\n` +
+      `  Transactions Buffered : ${result.transactions.length}\n` +
+      `  Transactions Exported : ${bufferedThisFilter} (queued — actual Sheets append reported in pipeline audit)\n` +
+      '========================================'
+    );
+    
+    // AFTER the collected buffer is processed, decide whether the cycle
+    // must abort. Only a real navigation/browser failure aborts the cycle;
+    // END_OF_PAGINATION / MAX_SCAN_REACHED / FULL_DUPLICATE_PAGE /
+    // STOP_REQUESTED are all normal terminations.
     if (result.navigationFailure) {
+      getLogger().warn(
+        `Filter "${filter.name}" ended with ${result.terminationReason} — ` +
+        `${result.transactions.length} row(s) already handed off to the pipeline before abort.`
+      );
       const err: any = new Error(
         `Navigation verification failed while scanning "${filter.name}" — aborting cycle`
       );
       err.isCycleFatal = true;
       throw err;
-    }
-    
-    for (const raw of result.transactions) {
-      if (!this.isRunning) break;
-      await this.processTransaction(raw, filter);
     }
   }
   

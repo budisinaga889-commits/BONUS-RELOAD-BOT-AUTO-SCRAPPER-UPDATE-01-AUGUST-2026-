@@ -26,28 +26,28 @@ const systemItems: NavItem[] = [
 const Sidebar: React.FC<SidebarProps> = ({ currentPage, onPageChange }) => {
   return (
     <aside className="w-52 bg-bg-secondary border-r border-border-color flex flex-col shrink-0">
-      {/* -------- Identity block -------- */}
-      <div className="px-3 pt-3 pb-2.5 border-b border-border-color">
+      {/* -------- Identity block (PATCH 12 — compact) --------
+          One row instead of three. Title stays on the top line; the
+          v1.0.0 / PRODUCTION badges collapse next to a much smaller
+          subtitle so the dashboard gains ~24px of vertical space. */}
+      <div className="px-3 pt-2.5 pb-2 border-b border-border-color">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-md bg-gradient-to-br from-accent-primary to-accent-strong flex items-center justify-center text-white text-[12px] font-bold shadow-sunken shrink-0">
+          <div className="w-6 h-6 rounded-md bg-gradient-to-br from-accent-primary to-accent-strong flex items-center justify-center text-white text-[11px] font-bold shadow-sunken shrink-0">
             L
           </div>
           <div className="flex-1 min-w-0">
-            <div className="text-[11px] uppercase tracking-[0.08em] font-semibold text-text-primary leading-tight">
+            <div className="text-[11px] uppercase tracking-[0.08em] font-semibold text-text-primary leading-tight truncate">
               Live Deposit Monitor
             </div>
-            <div className="text-[9.5px] text-text-tertiary leading-tight mt-[1px]">
-              Production Monitoring Console
+            <div className="mt-[2px] flex items-center gap-1 text-[9px] font-mono">
+              <span className="px-1 py-[0.5px] rounded border border-border-color text-text-secondary tabular-nums">
+                v1.0.0
+              </span>
+              <span className="px-1 py-[0.5px] rounded border border-emerald-500/30 bg-emerald-500/8 text-emerald-300">
+                PRODUCTION
+              </span>
             </div>
           </div>
-        </div>
-        <div className="mt-2 flex items-center gap-1.5 text-[9.5px] font-mono">
-          <span className="px-1.5 py-[1px] rounded border border-border-color text-text-secondary tabular-nums">
-            v1.0.0
-          </span>
-          <span className="px-1.5 py-[1px] rounded border border-emerald-500/30 bg-emerald-500/8 text-emerald-300">
-            PRODUCTION
-          </span>
         </div>
       </div>
 
