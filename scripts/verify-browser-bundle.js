@@ -168,7 +168,7 @@ function runChromeVersion(exePath) {
   } catch (e) {
     fail([`BUNDLE_INFO.json not valid JSON: ${e && e.message}`]);
   }
-  for (const k of ['playwrightVersion', 'chromiumRevision', 'browserSize', 'filesBundled', 'generatedAt']) {
+  for (const k of ['playwrightVersion', 'chromiumRevision', 'browserVersion', 'platform', 'architecture', 'browserSize', 'filesBundled', 'generatedAt']) {
     if (!(k in info)) fail([`BUNDLE_INFO.json missing required key: ${k}`]);
   }
   log(`  BUNDLE_INFO     : OK (playwright ${info.playwrightVersion}, revision ${info.chromiumRevision})`);

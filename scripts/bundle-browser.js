@@ -278,8 +278,12 @@ function browsersDirAlreadyValid(dir) {
 function emitBundleInfo(chromiumFolder, exePath) {
   const playwrightVersion = detectPlaywrightVersion();
   const chromiumRevision = String(chromiumFolder.name.split('-').pop() || 'unknown');
+  // Measure the STAGED folder (resources/browsers/chromium-<rev>) — the
+  // one that will actually be shipped — rather than the source cache.
+  const stagedFolder = path.join(BROWSERS_DIR, chromiumFolder.name);
+  const measureTarget = isDir(stagedFolder) ? stagedFolder : chromiumFolder.full;
   const measured = (function () {
-    try { return measureTree(chromiumFolder.full); } catch { return { files: 0, bytes: 0 }; }
+    try { return measureTree(measureTarget); } catch { return { files: 0, bytes: 0 }; }
   })();
   // Best-effort browser version detection. The exe is Windows-only so we
   // cannot exec it from a Linux/macOS host; verify-browser-bundle.js will
@@ -300,7 +304,8 @@ function emitBundleInfo(chromiumFolder, exePath) {
     browserSizeHuman: (measured.bytes / (1024 * 1024)).toFixed(1) + ' MB',
     filesBundled: measured.files,
     executable: path.relative(REPO_ROOT, exePath).replace(/\\/g, '/'),
-    hostPlatformAtBundle: `${os.platform()}-${os.arch()}-${os.release()}`
+    hostPlatformAtBundle: `${os.platform()}-${os.arch()}-${os.release()}`,
+    measuredFrom: measureTarget === stagedFolder ? 'staged' : 'source'
   };
   fs.mkdirSync(path.dirname(BUNDLE_INFO_PATH), { recursive: true });
   fs.writeFileSync(BUNDLE_INFO_PATH, JSON.stringify(info, null, 2) + '\n', 'utf8');
