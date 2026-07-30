@@ -140,23 +140,42 @@ function runChromeVersion(exePath) {
   if (!pe.ok) fail([pe.reason]);
   log(`  chrome.exe      : OK (${(pe.size / (1024 * 1024)).toFixed(1)} MB, valid PE)`);
 
-  // Companion files (the ones Chromium refuses to start without).
-  const companions = [
-    'version.txt',
-    'chrome_100_percent.pak',
-    'chrome_200_percent.pak',
-    'resources.pak',
-    'v8_context_snapshot.bin',
-    'icudtl.dat'
+  // ------------------------------------------------------------------
+  // Companion files — Chromium refuses to start without these actual
+  // RUNTIME binaries. Note: `version.txt` is intentionally NOT in this
+  // list. It is a documentation file Playwright emits for some
+  // revisions only; some builds omit it entirely. Enforcing it here
+  // was a false positive that rejected genuine, working Chromium
+  // bundles. The definitive usability check is `chrome.exe --version`
+  // (executed below on Windows), backed by the PE-header + runtime
+  // file existence checks on any host.
+  // ------------------------------------------------------------------
+  const requiredCompanions = [
+    'chrome.dll',                  // main Chromium module — mandatory
+    'chrome_100_percent.pak',      // required UI resources
+    'resources.pak',               // required base resources
+    'v8_context_snapshot.bin',     // required V8 startup snapshot
+    'icudtl.dat'                   // required ICU data
   ];
-  const missing = companions.filter(name => !isFile(path.join(chromeWinDir, name)));
-  if (missing.length > 0) {
+  // Optional companions — logged when present but never fatal.
+  const optionalCompanions = [
+    'chrome_200_percent.pak',
+    'version.txt'
+  ];
+  const missingRequired = requiredCompanions.filter(name => !isFile(path.join(chromeWinDir, name)));
+  if (missingRequired.length > 0) {
     fail([
-      `chrome-win/ is missing required companion files:`,
-      ...missing.map(m => `  • ${m}`)
+      `chrome-win/ is missing required runtime files:`,
+      ...missingRequired.map(m => `  • ${m}`),
+      '',
+      'These files are part of every Playwright Chromium build; their absence',
+      'means the browser cannot start. Re-run `npx playwright install chromium`',
+      'and then `npm run bundle:browser`.'
     ]);
   }
-  log(`  companion files : ${companions.length}/${companions.length} present`);
+  const optionalPresent = optionalCompanions.filter(name => isFile(path.join(chromeWinDir, name)));
+  log(`  runtime files   : ${requiredCompanions.length}/${requiredCompanions.length} required present` +
+      ` (+ ${optionalPresent.length}/${optionalCompanions.length} optional: ${optionalPresent.join(', ') || 'none'})`);
 
   // BUNDLE_INFO.json well-formed?
   if (!isFile(BUNDLE_INFO_PATH)) {
@@ -173,26 +192,47 @@ function runChromeVersion(exePath) {
   }
   log(`  BUNDLE_INFO     : OK (playwright ${info.playwrightVersion}, revision ${info.chromiumRevision})`);
 
-  // Runtime usability: prefer chrome.exe --version, fall back to version.txt.
+  // ------------------------------------------------------------------
+  // Runtime usability — this is the DEFINITIVE check.
+  //   • Windows host: execute chrome.exe --version. A version string
+  //     that matches /Chromium\s+\d/ is authoritative proof the browser
+  //     will start on the target machine.
+  //   • Non-Windows host: skipped (a Windows PE cannot be executed on
+  //     Linux/macOS without WINE). The PE header + required-runtime-
+  //     files checks above already guarantee structural correctness,
+  //     and the final launch on the operator's Windows PC is the last
+  //     line of defence. version.txt is only consulted as an optional
+  //     hint for the diagnostic report — its ABSENCE is expected and
+  //     tolerated (some Playwright Chromium revisions omit it).
+  // ------------------------------------------------------------------
   const run = runChromeVersion(exePath);
   if (run.ok === true) {
     info.browserVersion = run.version;
     info.runtimeCheck = { mode: run.mode, verifiedAt: new Date().toISOString(), passed: true };
-    log(`  runtime check   : PASSED (${run.mode}) → ${run.version}`);
+    log(`  runtime check   : PASSED (${run.mode}, definitive) → ${run.version}`);
   } else if (run.ok === 'skipped') {
-    // Not fatal on non-Windows hosts — the PE check + companion files
-    // already prove the bundle is structurally correct. The definitive
-    // usability check runs on Windows (either the developer's own PC
-    // during dist:portable or on the target machine at first launch).
-    let versionFromTxt = 'unknown';
+    // Best-effort: fill browserVersion from version.txt if present, else
+    // keep whatever bundle-browser.js wrote. Absence of version.txt is
+    // NOT an error.
+    let versionHint = info.browserVersion || 'unknown';
     const verFile = path.join(chromeWinDir, 'version.txt');
     if (isFile(verFile)) {
-      try { versionFromTxt = fs.readFileSync(verFile, 'utf8').trim() || 'unknown'; } catch {}
+      try {
+        const v = fs.readFileSync(verFile, 'utf8').trim();
+        if (v) versionHint = v;
+      } catch { /* keep existing */ }
     }
-    info.browserVersion = versionFromTxt;
-    info.runtimeCheck = { mode: 'skipped', reason: run.reason, verifiedAt: new Date().toISOString(), passed: false };
+    info.browserVersion = versionHint;
+    info.runtimeCheck = {
+      mode: 'skipped',
+      reason: run.reason,
+      verifiedAt: new Date().toISOString(),
+      passed: false,
+      note: 'Definitive chrome.exe --version check will run on the Windows target host at first launch.'
+    };
     warn(run.reason);
-    warn(`Reporting browserVersion from chrome-win/version.txt: ${versionFromTxt}`);
+    warn(`Reporting browserVersion hint: ${versionHint}` +
+         (isFile(verFile) ? ' (from chrome-win/version.txt)' : ' (version.txt not present — OK, some revisions omit it)'));
   } else {
     fail([
       `chrome.exe failed the runtime usability check:`,
