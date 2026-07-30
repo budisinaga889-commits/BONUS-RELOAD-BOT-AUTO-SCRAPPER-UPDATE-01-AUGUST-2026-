@@ -224,6 +224,13 @@ Windows PC and double-click. On first launch:
      bundled one
   2. `PLAYWRIGHT_BROWSERS_PATH`
   3. `%LOCALAPPDATA%\ms-playwright`
+- **Playwright is launched with `executablePath` pointing directly at
+  the resolved chrome.exe** (Patch 13.3). This bypasses Playwright's
+  internal revision-number lookup — a critical detail because
+  `playwright-core@1.42.0` has a hardcoded expected revision (1105)
+  that will almost never match the revision the developer's `npx
+  playwright install` produced. Passing `executablePath` makes the
+  revision mismatch irrelevant.
 - If none of the above yields a usable Chromium, a **friendly dialog**
   is shown (never Playwright's raw stack trace). It offers three
   buttons: **Copy Diagnostic**, **Open Log Folder**, **Close**.

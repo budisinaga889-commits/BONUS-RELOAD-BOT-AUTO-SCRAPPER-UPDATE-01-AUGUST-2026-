@@ -39,6 +39,7 @@ export class PlaywrightService {
     if (chromiumRes.ok) {
       applyChromiumResolution(chromiumRes);
       logger.info(`Chromium resolved for launch: ${chromiumRes.source} → ${chromiumRes.browsersPath}`);
+      logger.info(`  executable: ${chromiumRes.executable}`);
     } else {
       logger.error('Chromium not resolvable at launch time. Presenting the friendly dialog.');
       for (const s of chromiumRes.searched) {
@@ -53,12 +54,36 @@ export class PlaywrightService {
       throw new Error('Chromium browser is not available on this machine. Please reinstall the portable package or run "npx playwright install chromium".');
     }
     
-    // Responsive browser: no fixed viewport, launched maximized.
-    // Operators manually interact with the panel; the page must reflow when
-    // the window is resized just like a normal Chrome window.
+    // PATCH 13.3 — pass `executablePath` DIRECTLY to Playwright.
+    //
+    // Root cause: `playwright-core@1.42.0` has a hardcoded expected
+    // Chromium revision (1105) baked into `browsers.json`. When we
+    // rely on `PLAYWRIGHT_BROWSERS_PATH` alone, Playwright still
+    // performs its own internal lookup:
+    //     ${PLAYWRIGHT_BROWSERS_PATH}/chromium-1105/chrome-win/chrome.exe
+    // Because our bundler stages whatever revision `npx playwright
+    // install` produced (e.g. chromium-1187), the revisions do not
+    // match — and Playwright throws "Executable doesn't exist" even
+    // though the resolver already located a perfectly valid chrome.exe
+    // at chromium-1187/chrome-win/chrome.exe.
+    //
+    // Handing `executablePath` to launchPersistentContext() bypasses
+    // Playwright's internal revision lookup entirely and uses the
+    // exact binary the resolver already validated. This is the
+    // documented, stable path in Playwright's public API (LaunchOptions
+    // → executablePath, since 1.0).
+    //
+    // The PLAYWRIGHT_BROWSERS_PATH env var is still set by
+    // applyChromiumResolution() as a defensive fallback for any
+    // Playwright internal that might consult it for anciliary files.
+    //
+    // Responsive browser: no fixed viewport, launched maximized. Operators
+    // manually interact with the panel; the page must reflow when the
+    // window is resized just like a normal Chrome window.
     try {
       this.context = await chromium.launchPersistentContext(userDataDir, {
         headless: false,
+        executablePath: chromiumRes.executable || undefined,
         viewport: null,
         args: [
           '--no-sandbox',
