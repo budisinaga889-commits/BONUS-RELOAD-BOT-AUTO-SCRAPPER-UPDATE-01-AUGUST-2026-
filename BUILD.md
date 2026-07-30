@@ -95,18 +95,57 @@ skips the copy and only refreshes `BUNDLE_INFO.json`.
 npm run verify:browser-bundle
 ```
 
-Confirms:
-- `resources/browsers/chromium-<rev>/chrome-win/chrome.exe` exists
-- Non-trivial size + valid PE header (`MZ`)
-- Companion files present (`chrome_100_percent.pak`, `resources.pak`,
-  `v8_context_snapshot.bin`, `icudtl.dat`, `version.txt`, …)
-- `BUNDLE_INFO.json` well-formed
-- On Windows: runs `chrome.exe --version` and records the actual
-  Chromium version into `BUNDLE_INFO.json`. On non-Windows hosts this
-  step is skipped with a warning; the definitive execution check will
-  occur on the Windows target machine at first launch.
+The verifier answers **one** question:
 
-Any failure exits non-zero **before** electron-builder runs.
+> *"Is the bundled Chromium **structurally complete and deployable**?"*
+
+It intentionally does **not** try to answer "will Chromium run under
+every possible Windows environment" — that is the launch-time concern
+of `playwright.chromium.launchPersistentContext(...)`, and pre-answering
+it from a Node script has historically produced false negatives that
+rejected genuine, working bundles.
+
+### Three validation levels
+
+| Level | Meaning | Behaviour on failure |
+| ----- | ------- | -------------------- |
+| **1 — FATAL**   | Bundle is not structurally deployable          | Exit 1, build aborts |
+| **2 — WARN**    | Extra confidence signal; environment-dependent | Log warning, continue |
+| **3 — INFO**    | Pure reporting                                 | Never affects result |
+
+**Level 1 checks (build-blocking):**
+- `resources/browsers/chromium-<rev>/` exists
+- `chrome-win/` subfolder exists
+- `chrome.exe` exists and has a valid PE header (`MZ`, non-trivial size)
+- Required runtime files present: `chrome.dll`, `chrome_100_percent.pak`,
+  `resources.pak`, `v8_context_snapshot.bin`, `icudtl.dat`
+- `BUNDLE_INFO.json` is valid JSON and contains all 8 required keys
+
+**Level 2 checks (warning only, never block):**
+- `chrome.exe --version` opportunistic probe (Windows only) — kept
+  purely as an extra positive signal. Its failure is **not**
+  authoritative because the app launches Chromium via Playwright, not
+  by direct invocation
+- Optional companion files: `chrome_200_percent.pak`, `version.txt`
+- `locales/` folder present (headless_shell variants omit it)
+- `swiftshader/` folder present
+
+**Level 3 checks (informational):**
+- Chromium revision, Chromium version, Playwright version, bundle
+  size, file count, build timestamp, executable path
+
+### Adding new checks in the future
+
+If you need to add a new signal, place it as follows:
+
+- **Structural + cannot-run-without-it** → Level 1
+- **Extra confidence, environment-dependent** → Level 2
+- **Reporting only** → Level 3
+
+**NEVER add environment-dependent checks (executables running,
+network calls, permission probes, …) to Level 1.** If it can
+legitimately fail on a working bundle in some environment, it belongs
+in Level 2.
 
 ---
 

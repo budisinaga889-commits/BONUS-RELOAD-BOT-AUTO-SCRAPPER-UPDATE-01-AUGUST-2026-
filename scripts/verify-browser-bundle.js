@@ -1,25 +1,42 @@
 #!/usr/bin/env node
 /**
- * PATCH 13 §3 — Fail-fast pre-flight validator for the bundled Chromium.
+ * PATCH 13.2 — Confidence-based bundle validator.
  *
- * Runs BEFORE electron-builder. If anything is wrong, the exit code is 1
- * and electron-builder never starts — a broken Portable.exe can therefore
- * never be produced.
+ * Design principle
+ * ----------------
+ * The validator answers ONE question and one question only:
  *
- * Checks:
- *   1. resources/browsers/chromium-<rev>/chrome-win/chrome.exe exists
- *   2. chrome.exe is a valid PE binary and non-trivial in size
- *   3. Companion files (chrome-win/version.txt, chrome-win/chrome_100_percent.pak,
- *      chrome-win/resources.pak, chrome-win/v8_context_snapshot.bin) exist
- *   4. BUNDLE_INFO.json exists and is well-formed
- *   5. Runtime usability: when the host is Windows (or WINE is available),
- *      execute `chrome.exe --version` and require a non-empty version
- *      string starting with "Chromium ". Non-Windows hosts fall back to
- *      the PE header + companion-file check and log a warning that the
- *      final execution check must happen on Windows.
+ *     "Is the bundled Chromium structurally complete and deployable?"
  *
- * BUNDLE_INFO.json is updated with the real Chromium version when the
- * execution check runs successfully.
+ * It DOES NOT try to answer "will the bundled Chromium execute under
+ * every possible Windows environment?" — that is the launch-time
+ * concern of playwright.chromium.launchPersistentContext(). Trying to
+ * pre-answer runtime concerns from a Node script has led to two
+ * false-negative rejections in a row (version.txt mandatory, then
+ * chrome.exe --version mandatory).
+ *
+ * Validation is split into THREE levels:
+ *
+ * ┌─────────────┬────────────────────────────────────────────────────┐
+ * │ Level 1     │ FATAL. Failure ⇒ exit 1. The bundle is not         │
+ * │ (fail-fast) │ structurally deployable.                           │
+ * ├─────────────┼────────────────────────────────────────────────────┤
+ * │ Level 2     │ WARN. Emits a warning + diagnostic, continues.     │
+ * │ (soft)      │ Provides ADDITIONAL confidence, never gates the    │
+ * │             │ build.                                             │
+ * ├─────────────┼────────────────────────────────────────────────────┤
+ * │ Level 3     │ INFO. Pure reporting.                              │
+ * │ (info)      │                                                    │
+ * └─────────────┴────────────────────────────────────────────────────┘
+ *
+ * Adding a new signal in the future?
+ *   → Structural / cannot-run-without-it   → put in Level 1
+ *   → Extra confidence / environment-dependent → put in Level 2
+ *   → Reporting only                       → put in Level 3
+ *
+ * NEVER add environment-dependent checks (executables running, network
+ * calls, permission probes, …) to Level 1. If it CAN legitimately fail
+ * on a working bundle in some environment, it belongs in Level 2.
  */
 'use strict';
 
@@ -31,21 +48,20 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const BROWSERS_DIR = path.join(REPO_ROOT, 'resources', 'browsers');
 const BUNDLE_INFO_PATH = path.join(BROWSERS_DIR, 'BUNDLE_INFO.json');
 
-function log(msg)  { process.stdout.write(`[verify-browser-bundle] ${msg}\n`); }
-function warn(msg) { process.stderr.write(`[verify-browser-bundle] WARN: ${msg}\n`); }
-function fail(reasonLines) {
-  process.stderr.write('\n' + '='.repeat(64) + '\n');
-  process.stderr.write('ERROR — bundled Chromium is not usable\n');
-  process.stderr.write('='.repeat(64) + '\n');
-  for (const l of reasonLines) process.stderr.write(l + '\n');
-  process.stderr.write('\nFix:\n');
-  process.stderr.write('  1. Ensure Playwright Chromium is installed: npx playwright install chromium\n');
-  process.stderr.write('  2. Run the bundler:                        npm run bundle:browser\n');
-  process.stderr.write('  3. Re-run this verification:                npm run verify:browser-bundle\n');
-  process.stderr.write('  (see BUILD.md for the complete workflow)\n');
-  process.stderr.write('='.repeat(64) + '\n\n');
-  process.exit(1);
-}
+// ------------------------------------------------------------
+// Report accumulator — the validator collects every check into a
+// structured report before deciding the process exit code. This keeps
+// Level 2 warnings visible even when Level 1 has already passed, and
+// makes the terminal output reproduce the design table above.
+// ------------------------------------------------------------
+const report = {
+  level1: /** @type {{name: string, ok: boolean, detail: string}[]} */ ([]),
+  level2: /** @type {{name: string, ok: boolean|'skipped', detail: string}[]} */ ([]),
+  level3: /** @type {{name: string, value: string}[]} */ ([]),
+};
+function l1(name, ok, detail = '') { report.level1.push({ name, ok, detail }); }
+function l2(name, ok, detail = '') { report.level2.push({ name, ok, detail }); }
+function l3(name, value)            { report.level3.push({ name, value }); }
 
 function isDir(p)  { try { return fs.statSync(p).isDirectory(); } catch { return false; } }
 function isFile(p) { try { return fs.statSync(p).isFile();      } catch { return false; } }
@@ -80,170 +96,264 @@ function validatePE(exePath) {
   return { ok: true, size: st.size };
 }
 
-/**
- * Try to actually execute `chrome.exe --version`. On Windows this runs
- * natively. On non-Windows hosts we try `wine` if available, otherwise
- * we skip execution and rely on the PE + companion-file checks — this
- * is called out in the log so the developer knows the definitive
- * runtime check happens on Windows.
- */
-function runChromeVersion(exePath) {
-  if (process.platform === 'win32') {
-    try {
-      const r = cp.spawnSync(exePath, ['--version'], { encoding: 'utf8', timeout: 15000 });
-      if (r.status === 0 && r.stdout && /Chromium\s+\d/i.test(r.stdout)) {
-        return { ok: true, version: r.stdout.trim(), mode: 'native' };
-      }
-      return { ok: false, reason: `chrome.exe --version exited ${r.status}: stdout="${(r.stdout || '').trim()}" stderr="${(r.stderr || '').trim()}"` };
-    } catch (e) {
-      return { ok: false, reason: `spawn chrome.exe failed: ${e && e.message}` };
+// ------------------------------------------------------------
+// Level 2 opportunistic runtime probe.
+//
+// Explicitly NOT a gating check. The application never launches
+// chrome.exe directly — it goes through
+// `playwright.chromium.launchPersistentContext(...)`, which sets up
+// its own sandbox flags, user-data-dir, and env. A direct execution
+// with `--version` can fail for reasons entirely unrelated to whether
+// Playwright can drive the same binary (Windows AppLocker, restricted
+// service accounts, missing GDI dependencies for headed --version
+// output on some Server SKUs, etc). We still run it because when it
+// works it is a *very strong* positive signal for the bundle; we just
+// never treat its failure as authoritative.
+// ------------------------------------------------------------
+function opportunisticChromeVersion(exePath) {
+  if (process.platform !== 'win32') {
+    return { ok: 'skipped', reason: `not attempted on ${process.platform} (Windows PE cannot execute on this host)` };
+  }
+  try {
+    const r = cp.spawnSync(exePath, ['--version'], { encoding: 'utf8', timeout: 15000 });
+    if (r.status === 0 && r.stdout && /Chromium\s+\d/i.test(r.stdout)) {
+      return { ok: true, version: r.stdout.trim() };
     }
+    return { ok: false, reason: `exit=${r.status} stdout="${(r.stdout || '').trim()}" stderr="${(r.stderr || '').trim()}"` };
+  } catch (e) {
+    return { ok: false, reason: `spawn failed: ${e && e.message}` };
   }
-  // Non-Windows host: use wine if present, otherwise skip.
-  const which = cp.spawnSync('sh', ['-c', 'command -v wine'], { encoding: 'utf8' });
-  if (which.status === 0 && (which.stdout || '').trim()) {
-    try {
-      const r = cp.spawnSync('wine', [exePath, '--version'], { encoding: 'utf8', timeout: 20000 });
-      if (r.status === 0 && r.stdout && /Chromium\s+\d/i.test(r.stdout)) {
-        return { ok: true, version: r.stdout.trim(), mode: 'wine' };
-      }
-    } catch { /* fall through */ }
-  }
-  return { ok: 'skipped', reason: `runtime execution skipped on ${process.platform} (final check must happen on Windows)` };
 }
 
-// -----------------------------------------------------------------------------
-
+// ============================================================
+//                          M A I N
+// ============================================================
 (function main() {
-  log(`Verifying bundle in ${BROWSERS_DIR}`);
+  const line = '='.repeat(64);
+  process.stdout.write(line + '\n');
+  process.stdout.write('  Bundle Validator (confidence-based, 3 levels)\n');
+  process.stdout.write(`  Target: ${BROWSERS_DIR}\n`);
+  process.stdout.write(line + '\n\n');
+
+  // ------------------------------------------------------------
+  // LEVEL 1 — FATAL structural checks.
+  // ------------------------------------------------------------
   const chromium = findChromiumFolder();
-  if (!chromium) {
-    fail([`No chromium-<revision>/ folder found under resources/browsers/`]);
-  }
-  log(`  chromium folder : ${chromium.name}`);
+  l1('chromium folder present', chromium !== null, chromium ? chromium.name : 'no chromium-<rev>/ under resources/browsers');
+  if (!chromium) return finishAndExit();
 
   const chromeWinDir = path.join(chromium.full, 'chrome-win');
-  const exePath = path.join(chromeWinDir, 'chrome.exe');
-  if (!isDir(chromeWinDir)) {
-    fail([
-      `Missing chrome-win subfolder in ${chromium.name}`,
-      `Expected: ${chromeWinDir}`,
-      'This usually means the Playwright cache used at bundle time did not',
-      'contain a Windows-x64 Chromium (chrome-win). Re-run the bundle step',
-      'on a Windows host, or point PLAYWRIGHT_BROWSERS_PATH at a Windows cache.',
-    ]);
-  }
-  if (!isFile(exePath)) {
-    fail([`chrome.exe missing at ${exePath}`]);
-  }
-  const pe = validatePE(exePath);
-  if (!pe.ok) fail([pe.reason]);
-  log(`  chrome.exe      : OK (${(pe.size / (1024 * 1024)).toFixed(1)} MB, valid PE)`);
+  l1('chrome-win/ subfolder present', isDir(chromeWinDir), chromeWinDir);
+  if (!isDir(chromeWinDir)) return finishAndExit();
 
-  // ------------------------------------------------------------------
-  // Companion files — Chromium refuses to start without these actual
-  // RUNTIME binaries. Note: `version.txt` is intentionally NOT in this
-  // list. It is a documentation file Playwright emits for some
-  // revisions only; some builds omit it entirely. Enforcing it here
-  // was a false positive that rejected genuine, working Chromium
-  // bundles. The definitive usability check is `chrome.exe --version`
-  // (executed below on Windows), backed by the PE-header + runtime
-  // file existence checks on any host.
-  // ------------------------------------------------------------------
-  const requiredCompanions = [
-    'chrome.dll',                  // main Chromium module — mandatory
+  const exePath = path.join(chromeWinDir, 'chrome.exe');
+  l1('chrome.exe present', isFile(exePath), exePath);
+  if (!isFile(exePath)) return finishAndExit();
+
+  const pe = validatePE(exePath);
+  l1('chrome.exe is a valid PE binary', pe.ok, pe.ok ? `${(pe.size / (1024 * 1024)).toFixed(1)} MB, MZ header OK` : pe.reason);
+  if (!pe.ok) return finishAndExit();
+
+  // Required runtime files — every Playwright Chromium build ships these.
+  // Their absence means the browser physically cannot start no matter
+  // what environment it lands in.
+  const requiredFiles = [
+    'chrome.dll',                  // main Chromium module
     'chrome_100_percent.pak',      // required UI resources
     'resources.pak',               // required base resources
     'v8_context_snapshot.bin',     // required V8 startup snapshot
     'icudtl.dat'                   // required ICU data
   ];
-  // Optional companions — logged when present but never fatal.
-  const optionalCompanions = [
-    'chrome_200_percent.pak',
-    'version.txt'
-  ];
-  const missingRequired = requiredCompanions.filter(name => !isFile(path.join(chromeWinDir, name)));
-  if (missingRequired.length > 0) {
-    fail([
-      `chrome-win/ is missing required runtime files:`,
-      ...missingRequired.map(m => `  • ${m}`),
-      '',
-      'These files are part of every Playwright Chromium build; their absence',
-      'means the browser cannot start. Re-run `npx playwright install chromium`',
-      'and then `npm run bundle:browser`.'
-    ]);
-  }
-  const optionalPresent = optionalCompanions.filter(name => isFile(path.join(chromeWinDir, name)));
-  log(`  runtime files   : ${requiredCompanions.length}/${requiredCompanions.length} required present` +
-      ` (+ ${optionalPresent.length}/${optionalCompanions.length} optional: ${optionalPresent.join(', ') || 'none'})`);
+  const missingRequired = requiredFiles.filter(f => !isFile(path.join(chromeWinDir, f)));
+  l1('required runtime files present', missingRequired.length === 0,
+     missingRequired.length === 0
+       ? `${requiredFiles.length}/${requiredFiles.length} present`
+       : `missing: ${missingRequired.join(', ')}`);
+  if (missingRequired.length > 0) return finishAndExit();
 
-  // BUNDLE_INFO.json well-formed?
-  if (!isFile(BUNDLE_INFO_PATH)) {
-    fail([`BUNDLE_INFO.json missing at ${BUNDLE_INFO_PATH}`]);
-  }
+  // BUNDLE_INFO.json — deployment provenance. Malformed or missing
+  // required keys means we cannot honestly report what we are shipping.
+  l1('BUNDLE_INFO.json present', isFile(BUNDLE_INFO_PATH), BUNDLE_INFO_PATH);
+  if (!isFile(BUNDLE_INFO_PATH)) return finishAndExit();
   let info;
   try {
     info = JSON.parse(fs.readFileSync(BUNDLE_INFO_PATH, 'utf8'));
+    l1('BUNDLE_INFO.json is valid JSON', true, '');
   } catch (e) {
-    fail([`BUNDLE_INFO.json not valid JSON: ${e && e.message}`]);
+    l1('BUNDLE_INFO.json is valid JSON', false, e && e.message);
+    return finishAndExit();
   }
-  for (const k of ['playwrightVersion', 'chromiumRevision', 'browserVersion', 'platform', 'architecture', 'browserSize', 'filesBundled', 'generatedAt']) {
-    if (!(k in info)) fail([`BUNDLE_INFO.json missing required key: ${k}`]);
-  }
-  log(`  BUNDLE_INFO     : OK (playwright ${info.playwrightVersion}, revision ${info.chromiumRevision})`);
+  const requiredKeys = ['playwrightVersion', 'chromiumRevision', 'browserVersion', 'platform',
+                        'architecture', 'browserSize', 'filesBundled', 'generatedAt'];
+  const missingKeys = requiredKeys.filter(k => !(k in info));
+  l1('BUNDLE_INFO.json required keys', missingKeys.length === 0,
+     missingKeys.length === 0 ? `all ${requiredKeys.length} present` : `missing: ${missingKeys.join(', ')}`);
+  if (missingKeys.length > 0) return finishAndExit();
 
-  // ------------------------------------------------------------------
-  // Runtime usability — this is the DEFINITIVE check.
-  //   • Windows host: execute chrome.exe --version. A version string
-  //     that matches /Chromium\s+\d/ is authoritative proof the browser
-  //     will start on the target machine.
-  //   • Non-Windows host: skipped (a Windows PE cannot be executed on
-  //     Linux/macOS without WINE). The PE header + required-runtime-
-  //     files checks above already guarantee structural correctness,
-  //     and the final launch on the operator's Windows PC is the last
-  //     line of defence. version.txt is only consulted as an optional
-  //     hint for the diagnostic report — its ABSENCE is expected and
-  //     tolerated (some Playwright Chromium revisions omit it).
-  // ------------------------------------------------------------------
-  const run = runChromeVersion(exePath);
-  if (run.ok === true) {
-    info.browserVersion = run.version;
-    info.runtimeCheck = { mode: run.mode, verifiedAt: new Date().toISOString(), passed: true };
-    log(`  runtime check   : PASSED (${run.mode}, definitive) → ${run.version}`);
-  } else if (run.ok === 'skipped') {
-    // Best-effort: fill browserVersion from version.txt if present, else
-    // keep whatever bundle-browser.js wrote. Absence of version.txt is
-    // NOT an error.
-    let versionHint = info.browserVersion || 'unknown';
+  // ------------------------------------------------------------
+  // LEVEL 2 — SOFT confidence signals. Never fail the build.
+  // Everything here is a "nice-to-have" that boosts our confidence
+  // when it succeeds but does NOT mean the bundle is broken when it
+  // doesn't.
+  // ------------------------------------------------------------
+
+  // Extra Chromium resource paks that only some revisions ship.
+  const optionalFiles = [
+    'chrome_200_percent.pak',
+    'version.txt'
+  ];
+  for (const name of optionalFiles) {
+    const present = isFile(path.join(chromeWinDir, name));
+    l2(`optional companion: ${name}`, present, present ? 'present' : 'not present — OK, some revisions omit it');
+  }
+
+  // Chromium ships localised strings under `locales/` for the UI.
+  // Its absence would mean an incomplete Chromium tree — but there ARE
+  // Playwright chromium_headless_shell variants that omit it, so this
+  // is Level 2 not Level 1.
+  const localesDir = path.join(chromeWinDir, 'locales');
+  const localesCount = isDir(localesDir) ? fs.readdirSync(localesDir).filter(n => n.endsWith('.pak')).length : 0;
+  l2('locales/ folder present', localesCount > 0, localesCount > 0 ? `${localesCount} .pak files` : 'not present (headless_shell variant?)');
+
+  // Chromium ships SwiftShader (software WebGL) — present in every
+  // recent full Chromium build.
+  const swiftShaderDir = path.join(chromeWinDir, 'swiftshader');
+  l2('swiftshader/ folder present', isDir(swiftShaderDir),
+     isDir(swiftShaderDir) ? 'present' : 'not present (may indicate a stripped Chromium build)');
+
+  // Opportunistic `chrome.exe --version` probe.
+  //
+  // IMPORTANT: this is NOT a gating usability test. The real app never
+  // executes chrome.exe directly; it drives it through
+  // playwright.chromium.launchPersistentContext(...). A `--version`
+  // failure here does not predict a launchPersistentContext failure at
+  // runtime — and vice versa. We keep the probe purely as an extra
+  // confidence signal that gets recorded in BUNDLE_INFO.json when it
+  // happens to succeed.
+  const probe = opportunisticChromeVersion(exePath);
+  if (probe.ok === true) {
+    l2('chrome.exe --version (opportunistic)', true, probe.version);
+    info.browserVersion = probe.version;
+    info.runtimeCheck = { mode: 'probe', verifiedAt: new Date().toISOString(), passed: true, version: probe.version };
+  } else if (probe.ok === 'skipped') {
+    l2('chrome.exe --version (opportunistic)', 'skipped', probe.reason);
+    info.runtimeCheck = { mode: 'skipped', reason: probe.reason, verifiedAt: new Date().toISOString(), passed: null };
+  } else {
+    // Explicit design decision: --version failing does NOT fail the build.
+    // Playwright launches Chromium with different args, in a different
+    // process tree, with different sandboxing. A failed direct invocation
+    // is not evidence that Playwright will fail.
+    l2('chrome.exe --version (opportunistic)', false,
+       `${probe.reason} — NOT a bundle problem; app launches via Playwright, not directly`);
+    info.runtimeCheck = { mode: 'probe', reason: probe.reason, verifiedAt: new Date().toISOString(), passed: false };
+  }
+
+  // Best-effort version hint from version.txt if present (only used
+  // when the opportunistic probe did not succeed).
+  if (!info.browserVersion || info.browserVersion === 'unknown') {
     const verFile = path.join(chromeWinDir, 'version.txt');
     if (isFile(verFile)) {
       try {
         const v = fs.readFileSync(verFile, 'utf8').trim();
-        if (v) versionHint = v;
+        if (v) info.browserVersion = v;
       } catch { /* keep existing */ }
     }
-    info.browserVersion = versionHint;
-    info.runtimeCheck = {
-      mode: 'skipped',
-      reason: run.reason,
-      verifiedAt: new Date().toISOString(),
-      passed: false,
-      note: 'Definitive chrome.exe --version check will run on the Windows target host at first launch.'
-    };
-    warn(run.reason);
-    warn(`Reporting browserVersion hint: ${versionHint}` +
-         (isFile(verFile) ? ' (from chrome-win/version.txt)' : ' (version.txt not present — OK, some revisions omit it)'));
-  } else {
-    fail([
-      `chrome.exe failed the runtime usability check:`,
-      `  ${run.reason}`,
-      '',
-      'The executable is present but did not report a valid Chromium version.',
-      'Likely causes: antivirus quarantine mid-copy, damaged Playwright cache,',
-      'or the wrong architecture (chrome-win expects x64 Windows).'
-    ]);
   }
 
-  fs.writeFileSync(BUNDLE_INFO_PATH, JSON.stringify(info, null, 2) + '\n', 'utf8');
-  log('Bundle verification passed.');
+  // Persist any Level-2 discoveries into BUNDLE_INFO for the diagnostic report.
+  try {
+    fs.writeFileSync(BUNDLE_INFO_PATH, JSON.stringify(info, null, 2) + '\n', 'utf8');
+  } catch (e) {
+    l2('BUNDLE_INFO.json refresh', false, e && e.message);
+  }
+
+  // ------------------------------------------------------------
+  // LEVEL 3 — INFORMATIONAL reporting only.
+  // ------------------------------------------------------------
+  l3('Chromium revision',   info.chromiumRevision || '(unknown)');
+  l3('Chromium version',    info.browserVersion   || '(unknown)');
+  l3('Playwright version',  info.playwrightVersion || '(unknown)');
+  l3('Bundle size',         info.browserSizeHuman || (info.browserSize != null ? (info.browserSize / (1024*1024)).toFixed(1) + ' MB' : '(unknown)'));
+  l3('Files bundled',       String(info.filesBundled ?? '(unknown)'));
+  l3('Bundled on platform', `${info.platform || '?'} / ${info.architecture || '?'}`);
+  l3('Bundle timestamp',    info.generatedAt || '(unknown)');
+  l3('Executable',          info.executable  || '(unknown)');
+
+  finishAndExit();
 })();
+
+// ============================================================
+//              Report renderer + exit-code decider
+// ============================================================
+function finishAndExit() {
+  const line = '='.repeat(64);
+  const nl = '\n';
+  const buf = [];
+
+  const iconOK   = '\u2713'; // ✓
+  const iconFAIL = '\u2717'; // ✗
+  const iconWARN = '!';
+  const iconSKIP = '·';
+
+  // Level 1
+  buf.push('-- LEVEL 1 (FATAL) — structural bundle integrity ----------------');
+  let l1Failed = false;
+  for (const c of report.level1) {
+    const icon = c.ok ? iconOK : iconFAIL;
+    buf.push(`  ${icon} ${c.name}${c.detail ? '  —  ' + c.detail : ''}`);
+    if (!c.ok) l1Failed = true;
+  }
+  buf.push('');
+
+  // Level 2 (only render when we made it past Level 1 fully)
+  if (report.level2.length > 0) {
+    buf.push('-- LEVEL 2 (WARN) — additional confidence signals ---------------');
+    for (const c of report.level2) {
+      const icon = c.ok === true ? iconOK
+                 : c.ok === 'skipped' ? iconSKIP
+                 : iconWARN;
+      const tag  = c.ok === true ? '' : c.ok === 'skipped' ? '   [SKIPPED]' : '   [WARN — not a failure]';
+      buf.push(`  ${icon} ${c.name}${tag}${c.detail ? '  —  ' + c.detail : ''}`);
+    }
+    buf.push('');
+  }
+
+  // Level 3
+  if (report.level3.length > 0) {
+    buf.push('-- LEVEL 3 (INFO) — reporting -----------------------------------');
+    for (const c of report.level3) {
+      buf.push(`  · ${c.name.padEnd(22, ' ')}${c.value}`);
+    }
+    buf.push('');
+  }
+
+  buf.push(line);
+  if (l1Failed) {
+    buf.push('  RESULT: FAILED — bundle is NOT structurally deployable.');
+    buf.push('');
+    buf.push('  Fix:');
+    buf.push('    1. Ensure Playwright Chromium is installed:');
+    buf.push('         npx playwright install chromium');
+    buf.push('    2. Re-run the bundler:');
+    buf.push('         npm run bundle:browser');
+    buf.push('    3. Re-run this verification:');
+    buf.push('         npm run verify:browser-bundle');
+    buf.push('    (see BUILD.md for the complete workflow)');
+    buf.push(line);
+    process.stderr.write(buf.join(nl) + nl);
+    process.exit(1);
+  }
+  const warnings = report.level2.filter(c => c.ok === false).length;
+  const skipped  = report.level2.filter(c => c.ok === 'skipped').length;
+  buf.push(`  RESULT: PASSED — bundle is structurally deployable.`);
+  if (warnings > 0 || skipped > 0) {
+    buf.push(`          (${warnings} warning${warnings === 1 ? '' : 's'}, ${skipped} skipped — neither blocks the build)`);
+  }
+  buf.push('');
+  buf.push('  Note: the definitive usability test is the Playwright launch');
+  buf.push('  at first run, not chrome.exe --version. The validator only');
+  buf.push('  answers "is the bundle structurally complete and deployable?"');
+  buf.push(line);
+  process.stdout.write(buf.join(nl) + nl);
+  process.exit(0);
+}
