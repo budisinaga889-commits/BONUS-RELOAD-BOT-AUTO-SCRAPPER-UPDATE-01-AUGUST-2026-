@@ -17,8 +17,12 @@
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
     "start": "electron .",
-    "dist": "npm run build && electron-builder --win --x64",
-    "dist:portable": "npm run build && electron-builder --win portable --x64",
+    "bundle:browser": "node scripts/bundle-browser.js",
+    "verify:browser-bundle": "node scripts/verify-browser-bundle.js",
+    "portable:summary": "node scripts/portable-build-summary.js",
+    "prepack:portable": "npm run bundle:browser && npm run verify:browser-bundle",
+    "dist": "npm run build && npm run prepack:portable && electron-builder --win --x64 && npm run portable:summary",
+    "dist:portable": "npm run build && npm run prepack:portable && electron-builder --win portable --x64 && npm run portable:summary",
     "clean": "rimraf dist dist-build"
   },
   "dependencies": {

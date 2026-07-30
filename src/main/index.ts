@@ -16,6 +16,24 @@ import { MonitoringEngine } from './services/monitoring-engine';
 import { MaintenanceService } from './services/maintenance-service';
 import { ResetService } from './services/reset-service';
 import { registerIPCHandlers } from './ipc-handlers';
+import { resolveChromium, applyChromiumResolution, BrowserResolution } from './services/browser-resolver';
+
+/**
+ * PATCH 13 — Runtime Chromium resolution is now delegated to the
+ * dedicated `browser-resolver` service which applies the strict
+ * priority chain:
+ *
+ *   1. Bundled          → resources/browsers/chromium-<rev>/
+ *   2. Env override     → PLAYWRIGHT_BROWSERS_PATH
+ *   3. Platform default → %LOCALAPPDATA%\ms-playwright  (Windows)
+ *                         ~/Library/Caches/ms-playwright (macOS)
+ *                         ~/.cache/ms-playwright         (Linux)
+ *
+ * On a failed resolution we DO NOT throw or expose Playwright's raw
+ * exception. The friendly "Chromium Browser Not Found" dialog is
+ * shown right after the main window becomes ready.
+ */
+let pendingBrowserFailure: BrowserResolution | null = null;
 
 /**
  * Iteration 12 — Embedded Chromium discovery.
@@ -26,24 +44,19 @@ import { registerIPCHandlers } from './ipc-handlers';
  *   3. If neither is present the operator sees a friendly error later
  *      when clicking Open Browser (handled by PlaywrightService.launchBrowser).
  */
+/**
+ * PATCH 13 — Legacy helper kept ONLY as a thin wrapper around the new
+ * browser-resolver so any external caller (there are none inside the
+ * repo) keeps working. Prefer `resolveChromium()` directly.
+ */
 function resolveEmbeddedChromium(): { embedded: boolean; path: string | null } {
-  // Look next to the app resources first (works in production dist).
-  const candidates: string[] = [];
-  try { candidates.push(path.join(process.resourcesPath || '', 'browsers')); } catch {}
-  try { candidates.push(path.join(app.getAppPath(), 'resources', 'browsers')); } catch {}
-  try { candidates.push(path.join(app.getAppPath(), '..', 'resources', 'browsers')); } catch {}
-  for (const c of candidates) {
-    try {
-      if (c && fs.existsSync(c) && fs.statSync(c).isDirectory()) {
-        // Contains chromium- prefixed folders per Playwright convention.
-        const hasChromium = fs.readdirSync(c).some(name => name.startsWith('chromium'));
-        if (hasChromium) {
-          process.env.PLAYWRIGHT_BROWSERS_PATH = c;
-          return { embedded: true, path: c };
-        }
-      }
-    } catch { /* keep searching */ }
+  const r = resolveChromium();
+  if (r.ok && r.browsersPath) {
+    applyChromiumResolution(r);
+    if (r.source !== 'bundled') pendingBrowserFailure = null;
+    return { embedded: r.source === 'bundled', path: r.browsersPath };
   }
+  pendingBrowserFailure = r;
   return { embedded: false, path: process.env.PLAYWRIGHT_BROWSERS_PATH || null };
 }
 
@@ -72,10 +85,23 @@ async function initializeApp() {
   logger.info(`Packaged: ${app.isPackaged}`);
   logger.info(`App path: ${app.getAppPath()}`);
 
-  // Iteration 12 — set embedded Chromium path BEFORE PlaywrightService
-  // instantiation so its launchBrowser call inherits the env var.
+  // PATCH 13 — Runtime browser resolution using the new resolver.
+  // Emits a full search-trail into the app log so a failed launch on a
+  // clean Windows PC can be diagnosed without exposing Playwright's
+  // internal stack trace to the operator.
   const browserResolve = resolveEmbeddedChromium();
-  logger.info(`Chromium source: ${browserResolve.embedded ? `EMBEDDED (${browserResolve.path})` : 'Playwright default (ms-playwright)'}`);
+  if (browserResolve.embedded) {
+    logger.info(`Chromium source: BUNDLED (${browserResolve.path})`);
+  } else if (browserResolve.path) {
+    logger.warn(`Chromium source: NOT BUNDLED — falling back to ${browserResolve.path}`);
+  } else {
+    logger.error('Chromium source: NOT FOUND in any known location. Operator will see the "Chromium Browser Not Found" dialog after the main window opens.');
+    if (pendingBrowserFailure) {
+      for (const s of pendingBrowserFailure.searched) {
+        logger.warn(`  probed ${s.label}: ${s.path} (exists=${s.exists}, hasChromium=${s.hasChromium})`);
+      }
+    }
+  }
 
   const configManager = new ConfigManager(appDirManager);
   const sqliteService = new SQLiteService(appDirManager);
@@ -109,6 +135,23 @@ async function initializeApp() {
   windowManager = new WindowManager();
   windowManager.setAppDirManager(appDirManager);
   windowManager.createMainWindow();
+
+  // PATCH 13 — If Chromium could not be resolved at startup, present
+  // the friendly "Chromium Browser Not Found" dialog once the main
+  // window is up. We deliberately delay the dialog until AFTER the
+  // window exists so it appears modal on top of the dashboard and the
+  // operator does not see a phantom modal in the tray.
+  if (pendingBrowserFailure) {
+    const failure = pendingBrowserFailure;
+    setImmediate(async () => {
+      try {
+        const { showBrowserNotFoundDialog } = await import('./services/browser-resolver');
+        await showBrowserNotFoundDialog(failure, appDirManager.getLogsDir());
+      } catch (e: any) {
+        logger.error('Failed to show Chromium Browser Not Found dialog', e);
+      }
+    });
+  }
   
   // Stream every log entry (Winston + broadcast) to the renderer's Live Log panel.
   // Subscribing AFTER createMainWindow() means startup messages already went to the

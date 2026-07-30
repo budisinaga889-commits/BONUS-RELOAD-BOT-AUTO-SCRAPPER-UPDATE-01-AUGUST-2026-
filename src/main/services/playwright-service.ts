@@ -3,6 +3,7 @@ import { AppDirectoryManager } from './app-directory-manager';
 import { getLogger } from './logger-service';
 import { SELECTORS } from '../../utils/selector-repository';
 import { formatPanelDate } from '../../utils/date-utils';
+import { resolveChromium, applyChromiumResolution, showBrowserNotFoundDialog } from './browser-resolver';
 
 /**
  * Result of a session/login validation check.
@@ -28,19 +29,58 @@ export class PlaywrightService {
     logger.info('Launching browser...');
     
     const userDataDir = this.appDirManager.getBrowserProfileDir();
+
+    // PATCH 13 — Re-resolve Chromium at launch time (in addition to the
+    // one-shot resolution at app boot in main/index.ts). This catches
+    // the edge case where the operator installed Chromium AFTER app
+    // start, and lets us re-apply PLAYWRIGHT_BROWSERS_PATH before we
+    // hand control to Playwright.
+    const chromiumRes = resolveChromium();
+    if (chromiumRes.ok) {
+      applyChromiumResolution(chromiumRes);
+      logger.info(`Chromium resolved for launch: ${chromiumRes.source} → ${chromiumRes.browsersPath}`);
+    } else {
+      logger.error('Chromium not resolvable at launch time. Presenting the friendly dialog.');
+      for (const s of chromiumRes.searched) {
+        logger.warn(`  probed ${s.label}: ${s.path} (exists=${s.exists}, hasChromium=${s.hasChromium})`);
+      }
+      // Show the friendly dialog and throw a clean, translated error.
+      // The renderer / IPC caller receives this instead of Playwright's
+      // raw "Executable doesn't exist… npx playwright install" message.
+      try {
+        await showBrowserNotFoundDialog(chromiumRes, this.appDirManager.getLogsDir());
+      } catch { /* dialog itself failing must not crash the app */ }
+      throw new Error('Chromium browser is not available on this machine. Please reinstall the portable package or run "npx playwright install chromium".');
+    }
     
     // Responsive browser: no fixed viewport, launched maximized.
     // Operators manually interact with the panel; the page must reflow when
     // the window is resized just like a normal Chrome window.
-    this.context = await chromium.launchPersistentContext(userDataDir, {
-      headless: false,
-      viewport: null,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--start-maximized'
-      ]
-    });
+    try {
+      this.context = await chromium.launchPersistentContext(userDataDir, {
+        headless: false,
+        viewport: null,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--start-maximized'
+        ]
+      });
+    } catch (error: any) {
+      // PATCH 13 — Wrap Playwright's raw "Executable doesn't exist" error
+      // in a friendly dialog. Any other launch failure (permissions,
+      // occupied port, etc.) is re-thrown unchanged so it still surfaces
+      // in the app log with its original stack.
+      const msg = String(error?.message || error || '');
+      if (/Executable doesn't exist/i.test(msg) || /Please run.*playwright install/i.test(msg)) {
+        logger.error('Playwright reported missing executable at launch — presenting friendly dialog.');
+        try {
+          await showBrowserNotFoundDialog(resolveChromium(), this.appDirManager.getLogsDir());
+        } catch { /* dialog failure is non-fatal */ }
+        throw new Error('Chromium browser is not available on this machine. Please reinstall the portable package or run "npx playwright install chromium".');
+      }
+      throw error;
+    }
     
     const pages = this.context.pages();
     this.page = pages.length > 0 ? pages[0] : await this.context.newPage();

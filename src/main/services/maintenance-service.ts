@@ -8,6 +8,7 @@ import { GoogleSheetsService } from './google-sheets-service';
 import { PlaywrightService } from './playwright-service';
 import { MonitoringEngine } from './monitoring-engine';
 import { getLogger } from './logger-service';
+import { resolveChromium } from './browser-resolver';
 
 /**
  * MaintenanceService (Iteration 12)
@@ -40,7 +41,25 @@ export interface DiagnosticReport {
   timestamp: string;
   version: { app: string; electron: string; node: string; chrome: string };
   db: DbHealth;
-  browser: { connected: boolean; embedded: boolean; path: string | null };
+  browser: {
+    connected: boolean;
+    embedded: boolean;
+    path: string | null;
+    // PATCH 13 — deployment diagnostics extensions
+    source: 'bundled' | 'env-PLAYWRIGHT_BROWSERS_PATH' | 'platform-default-cache' | 'not-found';
+    executable: string | null;
+    version: string | null;
+    playwrightVersion: string;
+    buildMode: 'PORTABLE' | 'INSTALLED';
+    bundleInfo: {
+      playwrightVersion: string;
+      chromiumRevision: string;
+      browserVersion: string;
+      browserSize: number | null;
+      generatedAt: string | null;
+      filesBundled: number | null;
+    } | null;
+  };
   googleSheets: { connected: boolean; spreadsheetTitle: string | null; worksheet: string | null };
   monitoring: { running: boolean; state: string; enabledProfiles: number };
   paths: { base: string; config: string; database: string; logs: string; backups: string };
@@ -307,8 +326,34 @@ export class MaintenanceService {
   // ---------- diagnostic report ----------
   async diagnosticReport(): Promise<DiagnosticReport> {
     const db = await this.getDbHealth();
-    const bpath = process.env.PLAYWRIGHT_BROWSERS_PATH || null;
-    const embedded = !!bpath && bpath.includes(this.appDirManager.getBaseDir());
+    // PATCH 13 — deployment diagnostics.
+    const chromiumRes = resolveChromium();
+    const bpath = chromiumRes.browsersPath || process.env.PLAYWRIGHT_BROWSERS_PATH || null;
+    const embedded = chromiumRes.source === 'bundled';
+    let playwrightVersion = 'unknown';
+    try { playwrightVersion = require('playwright/package.json').version || 'unknown'; } catch {}
+    // Load BUNDLE_INFO.json from the packaged resources tree when present.
+    // Missing file is a legitimate state (source install, dev mode) — the
+    // renderer displays "—" and no error is raised.
+    const bundleInfoPath = chromiumRes.browsersPath
+      ? path.join(chromiumRes.browsersPath, 'BUNDLE_INFO.json')
+      : null;
+    let bundleInfo: DiagnosticReport['browser']['bundleInfo'] = null;
+    if (bundleInfoPath) {
+      try {
+        if (fs.existsSync(bundleInfoPath)) {
+          const raw = JSON.parse(fs.readFileSync(bundleInfoPath, 'utf8'));
+          bundleInfo = {
+            playwrightVersion: String(raw.playwrightVersion ?? 'unknown'),
+            chromiumRevision: String(raw.chromiumRevision ?? 'unknown'),
+            browserVersion:   String(raw.browserVersion ?? 'unknown'),
+            browserSize:      typeof raw.browserSize === 'number' ? raw.browserSize : null,
+            generatedAt:      raw.generatedAt ? String(raw.generatedAt) : null,
+            filesBundled:     typeof raw.filesBundled === 'number' ? raw.filesBundled : null,
+          };
+        }
+      } catch { /* best-effort */ }
+    }
     let googleTitle: string | null = null;
     let googleSheet: string | null = null;
     try {
@@ -328,7 +373,13 @@ export class MaintenanceService {
       browser: {
         connected: (this.playwrightService as any).page != null,
         embedded,
-        path: bpath
+        path: bpath,
+        source: chromiumRes.source,
+        executable: chromiumRes.executable,
+        version: chromiumRes.version,
+        playwrightVersion,
+        buildMode: this.appDirManager.isPortableMode() ? 'PORTABLE' : 'INSTALLED',
+        bundleInfo
       },
       googleSheets: {
         connected: !!googleTitle,
@@ -382,8 +433,21 @@ export class MaintenanceService {
       '',
       '-- Browser -------------------------------------------------',
       `  Connected     : ${r.browser.connected}`,
+      `  Source        : ${r.browser.source}`,
       `  Embedded      : ${r.browser.embedded}`,
+      `  Build Mode    : ${r.browser.buildMode}`,
       `  Path          : ${r.browser.path || '(default: ms-playwright)'}`,
+      `  Executable    : ${r.browser.executable || '—'}`,
+      `  Chromium ver. : ${r.browser.version || '—'}`,
+      `  Playwright    : ${r.browser.playwrightVersion}`,
+      ...(r.browser.bundleInfo ? [
+        `  Bundle Info   :`,
+        `    generatedAt : ${r.browser.bundleInfo.generatedAt || '—'}`,
+        `    revision    : ${r.browser.bundleInfo.chromiumRevision}`,
+        `    version     : ${r.browser.bundleInfo.browserVersion}`,
+        `    size        : ${r.browser.bundleInfo.browserSize !== null ? (r.browser.bundleInfo.browserSize / (1024 * 1024)).toFixed(1) + ' MB' : '—'}`,
+        `    files       : ${r.browser.bundleInfo.filesBundled ?? '—'}`,
+      ] : [`  Bundle Info   : (none — running from Playwright cache, not a portable build)`]),
       '',
       '-- Google Sheets -------------------------------------------',
       `  Connected     : ${r.googleSheets.connected}`,

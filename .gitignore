@@ -1,6 +1,11 @@
 node_modules/
 dist/
 dist-build/
+
+# PATCH 13 — bundled Chromium (~180 MB). Copied automatically into this
+# folder by `npm run bundle:browser` before electron-builder runs. Never
+# commit — repository stays lightweight.
+resources/browsers/
 *.log
 .DS_Store
 .env
